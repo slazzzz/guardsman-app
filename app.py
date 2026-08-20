@@ -206,6 +206,28 @@ async def resolve_display_names(interaction: Interaction, user_ids: list[int]) -
             names[user_id] = f"Unknown ({user_id})"
     return names
 
+async def post_or_update_leaderboard_message(
+    channel_id: int,
+    embed: Embed,
+    stored_message_id: Optional[int] = None,
+    stored_channel_id: Optional[int] = None,
+) -> discord.Message:
+    """Edits the previously-posted leaderboard message in place if it can still be found,
+    otherwise posts a fresh one. This is what makes re-running a leaderboard command update
+    the existing channel message instead of spamming a new one every time - the caller is
+    responsible for persisting the returned message's id/channel for next time (e.g. in the
+    events table, or bot_data.json for the global leaderboard)."""
+    if stored_message_id and stored_channel_id:
+        try:
+            existing_channel = bot.get_channel(stored_channel_id) or await bot.fetch_channel(stored_channel_id)
+            existing_message = await existing_channel.fetch_message(stored_message_id)
+            return await existing_message.edit(embed=embed)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass  # message or channel is gone (e.g. deleted by a mod) - fall through and post fresh
+
+    channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+    return await channel.send(embed=embed)
+
 ### BOT DATA READ ###
 
 bot_data = load_json("bot_data.json")
@@ -333,6 +355,8 @@ def ensure_column(table: str, column: str, definition: str):
 
 ensure_column("events", "event_start_time", "TEXT")
 ensure_column("events", "reminder_sent", "INTEGER DEFAULT 0")
+ensure_column("events", "leaderboard_message_id", "INTEGER")
+ensure_column("events", "leaderboard_channel_id", "INTEGER")
 
 ### ROBLOX CACHE PERSISTENCE ###
 # roblox_username_cache / roblox_avatar_cache stay as in-memory dicts for fast
@@ -784,9 +808,21 @@ async def _event_leadeboard(interaction: Interaction, event_number: int = 0, dis
     await interaction.response.send_message(embed=embed)
 
     if display_in_channel:
-        channel = interaction.guild.get_channel(LEADERBOARD_CHANNEL_ID)
-        if channel:
-            await channel.send(embed=embed)
+        cursor.execute(
+            "SELECT leaderboard_message_id, leaderboard_channel_id FROM events WHERE id = ?",
+            (event_id,)
+        )
+        existing_message_id, existing_channel_id = cursor.fetchone() or (None, None)
+
+        posted_message = await post_or_update_leaderboard_message(
+            LEADERBOARD_CHANNEL_ID, embed, existing_message_id, existing_channel_id
+        )
+
+        cursor.execute(
+            "UPDATE events SET leaderboard_message_id = ?, leaderboard_channel_id = ? WHERE id = ?",
+            (posted_message.id, posted_message.channel.id, event_id)
+        )
+        conn.commit()
 
     if generate_image and event_results:
         names = await resolve_display_names(interaction, [row[0] for row in event_results])
@@ -936,9 +972,19 @@ async def _global_leadeboard(interaction: Interaction, first_event_number: int =
     await interaction.response.send_message(embed=embed)
 
     if display_in_channel:
-        channel = interaction.guild.get_channel(LEADERBOARD_CHANNEL_ID)
-        if channel:
-            await channel.send(embed=embed)
+        existing_message_id = leaderboard_data.get("global_leaderboard_message_id")
+        existing_channel_id = leaderboard_data.get("global_leaderboard_channel_id")
+
+        posted_message = await post_or_update_leaderboard_message(
+            LEADERBOARD_CHANNEL_ID, embed, existing_message_id, existing_channel_id
+        )
+
+        leaderboard_data.update({
+            "global_leaderboard_message_id": posted_message.id,
+            "global_leaderboard_channel_id": posted_message.channel.id,
+        })
+        bot_data.update({"leaderboard_data": leaderboard_data})
+        save_json("bot_data.json", bot_data)
 
     if generate_image and leaderboard:
         names = await resolve_display_names(interaction, [row[0] for row in leaderboard])
