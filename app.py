@@ -84,6 +84,14 @@ def placement_line(i: int, user_id: int, score: int, label: str = "Point") -> st
         return f"{PLACEMENT_EMOJIS[i]} **{place_word} place** - <@{user_id}> - {score} {label}{suffix}\n"
     return f"**{i + 1}{ordinal(i + 1)} place** - <@{user_id}> - {score} {label}{suffix}\n"
 
+def team_placement_line(i: int, team_name: str, score: int, label: str = "Point") -> str:
+    """Same as placement_line, but for a team name instead of a Discord mention."""
+    suffix = "s" if score != 1 else ""
+    if i in PLACEMENT_EMOJIS:
+        place_word = {0: "1st", 1: "2nd", 2: "3rd"}[i]
+        return f"{PLACEMENT_EMOJIS[i]} **{place_word} place** - {team_name} - {score} {label}{suffix}\n"
+    return f"**{i + 1}{ordinal(i + 1)} place** - {team_name} - {score} {label}{suffix}\n"
+
 def get_roblox_id_from_username(username: str) -> Optional[int]:
     if username in roblox_username_cache.values():
         return next((k for k, v in roblox_username_cache.items() if v == username), None)
@@ -142,50 +150,161 @@ def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
             # Older Pillow versions don't support a `size` kwarg on load_default
             return ImageFont.load_default()
 
-def leaderboard_image(player_results: list[tuple], display_names: dict[int, str]) -> discord.File:
+def make_circular_avatar(avatar: Image.Image, size: int) -> Image.Image:
+    """Crops an avatar image to a circle of the given diameter."""
+    avatar = avatar.convert("RGBA").resize((size, size), Image.LANCZOS)
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
+    circular = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    circular.paste(avatar, (0, 0), mask=mask)
+    return circular
+
+def truncate_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> str:
+    """Shortens text with a trailing ellipsis so it never overlaps the score column."""
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+    while text and draw.textlength(text + "…", font=font) > max_width:
+        text = text[:-1]
+    return (text + "…") if text else "…"
+
+LEADERBOARD_WIDTH = 900
+LEADERBOARD_PADDING = 36
+LEADERBOARD_HEADER_HEIGHT = 96
+LEADERBOARD_ROW_HEIGHT = 92
+LEADERBOARD_ROW_GAP = 14
+LEADERBOARD_AVATAR_SIZE = 64
+LEADERBOARD_BADGE_SIZE = 40
+LEADERBOARD_CARD_FILL = (255, 255, 255, 14)
+LEADERBOARD_CARD_TOP3_ALPHA = 34
+
+def leaderboard_image(player_results: list[tuple], display_names: dict[int, str], title: str = "Leaderboard") -> discord.File:
     """Renders a leaderboard PNG entirely in memory (no shared file on disk, so concurrent
     calls can't clobber each other) and returns it as a ready-to-send discord.File.
 
     display_names must be resolved by the caller beforehand (bot.get_user() can return
     None for uncached users, which used to crash this function).
     """
-    img = Image.new("RGB", (800, 600), color=(20, 20, 20))
-    draw = ImageDraw.Draw(img)
+    entry_count = max(len(player_results), 1)
+    height = (
+        LEADERBOARD_HEADER_HEIGHT + LEADERBOARD_PADDING
+        + entry_count * (LEADERBOARD_ROW_HEIGHT + LEADERBOARD_ROW_GAP) - LEADERBOARD_ROW_GAP
+        + LEADERBOARD_PADDING
+    )
 
-    font_big = load_font(40)
-    font_small = load_font(24)
+    # Background gradient, drawn straight into the opaque base layer.
+    base = Image.new("RGBA", (LEADERBOARD_WIDTH, height), (0, 0, 0, 255))
+    base_draw = ImageDraw.Draw(base)
+    top_color, bottom_color = (32, 30, 46), (15, 14, 20)
+    for y in range(height):
+        t = y / max(height - 1, 1)
+        r = int(top_color[0] + (bottom_color[0] - top_color[0]) * t)
+        g = int(top_color[1] + (bottom_color[1] - top_color[1]) * t)
+        b = int(top_color[2] + (bottom_color[2] - top_color[2]) * t)
+        base_draw.line([(0, y), (LEADERBOARD_WIDTH, y)], fill=(r, g, b, 255))
 
-    y_offset = 50
+    # Card backgrounds/rings live on their own transparent layer so they can be
+    # semi-transparent without needing to hand-blend colors against the gradient.
+    overlay = Image.new("RGBA", (LEADERBOARD_WIDTH, height), (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+
+    # Text and avatars go on a third layer, composited last so they're always crisp.
+    text_layer = Image.new("RGBA", (LEADERBOARD_WIDTH, height), (0, 0, 0, 0))
+    text_draw = ImageDraw.Draw(text_layer)
+
+    font_title = load_font(34)
+    font_name = load_font(24)
+    font_score = load_font(22)
+    font_badge = load_font(20)
+
+    text_draw.text((LEADERBOARD_PADDING, 30), title, font=font_title, fill=(255, 255, 255, 255))
+    overlay_draw.line(
+        [(LEADERBOARD_PADDING, LEADERBOARD_HEADER_HEIGHT - 6), (LEADERBOARD_WIDTH - LEADERBOARD_PADDING, LEADERBOARD_HEADER_HEIGHT - 6)],
+        fill=(255, 255, 255, 30), width=2
+    )
+
+    row_left = LEADERBOARD_PADDING
+    row_right = LEADERBOARD_WIDTH - LEADERBOARD_PADDING
+    y = LEADERBOARD_HEADER_HEIGHT + LEADERBOARD_PADDING - LEADERBOARD_ROW_GAP
 
     for i, result in enumerate(player_results):
         user_id, score, roblox_id = result[0], result[1], result[2]
-
         name = display_names.get(user_id, f"Unknown ({user_id})")
+        color = PLACEMENT_COLORS.get(i, DEFAULT_PLACEMENT_COLOR)
+
+        row_top = y + LEADERBOARD_ROW_GAP
+        row_bottom = row_top + LEADERBOARD_ROW_HEIGHT
+        row_mid = row_top + LEADERBOARD_ROW_HEIGHT // 2
+
+        card_fill = (*color, LEADERBOARD_CARD_TOP3_ALPHA) if i < 3 else LEADERBOARD_CARD_FILL
+        overlay_draw.rounded_rectangle([row_left, row_top, row_right, row_bottom], radius=18, fill=card_fill)
+
+        # Rank badge
+        badge_cx = row_left + 30
+        badge_fill = (*color, 255) if i < 3 else (70, 70, 82, 255)
+        overlay_draw.ellipse(
+            [badge_cx - LEADERBOARD_BADGE_SIZE // 2, row_mid - LEADERBOARD_BADGE_SIZE // 2,
+             badge_cx + LEADERBOARD_BADGE_SIZE // 2, row_mid + LEADERBOARD_BADGE_SIZE // 2],
+            fill=badge_fill
+        )
+        badge_text = str(i + 1)
+        bbox = text_draw.textbbox((0, 0), badge_text, font=font_badge)
+        text_draw.text(
+            (badge_cx - (bbox[2] - bbox[0]) / 2, row_mid - (bbox[3] - bbox[1]) / 2 - bbox[1]),
+            badge_text, font=font_badge,
+            fill=(20, 20, 24, 255) if i < 3 else (230, 230, 235, 255)
+        )
+
+        # Avatar with a placement-colored ring
+        avatar_cx = badge_cx + LEADERBOARD_BADGE_SIZE // 2 + 16 + LEADERBOARD_AVATAR_SIZE // 2
+        avatar_left = avatar_cx - LEADERBOARD_AVATAR_SIZE // 2
+        avatar_top = row_mid - LEADERBOARD_AVATAR_SIZE // 2
+        ring_pad = 3
+        overlay_draw.ellipse(
+            [avatar_left - ring_pad, avatar_top - ring_pad,
+             avatar_left + LEADERBOARD_AVATAR_SIZE + ring_pad, avatar_top + LEADERBOARD_AVATAR_SIZE + ring_pad],
+            fill=(*color, 255) if i < 3 else (90, 90, 100, 255)
+        )
 
         avatar_url = get_avatar_url(roblox_id) if roblox_id else None
         avatar = None
-
         if avatar_url:
             try:
                 response = requests.get(avatar_url, timeout=5)
-                avatar = Image.open(BytesIO(response.content)).resize((80, 80))
+                avatar = Image.open(BytesIO(response.content))
             except (requests.RequestException, OSError) as e:
                 print(f"Could not load avatar for {user_id}: {e}")
-
         if avatar is None:
-            avatar = Image.open(FALLBACK_AVATAR_PATH).resize((80, 80))
+            avatar = Image.open(FALLBACK_AVATAR_PATH)
 
-        img.paste(avatar, (50, y_offset))
+        circular_avatar = make_circular_avatar(avatar, LEADERBOARD_AVATAR_SIZE)
+        text_layer.paste(circular_avatar, (avatar_left, avatar_top), mask=circular_avatar)
 
-        color = PLACEMENT_COLORS.get(i, DEFAULT_PLACEMENT_COLOR)
+        # Name (truncated so it can never collide with the score column)
+        text_x = avatar_left + LEADERBOARD_AVATAR_SIZE + 20
+        max_name_width = row_right - 170 - text_x
+        display_text = truncate_text(text_draw, name, font_name, max_name_width)
+        name_bbox = text_draw.textbbox((0, 0), display_text, font=font_name)
+        text_draw.text(
+            (text_x, row_mid - (name_bbox[3] - name_bbox[1]) / 2 - name_bbox[1]),
+            display_text, font=font_name, fill=(255, 255, 255, 255)
+        )
 
-        draw.text((150, y_offset), f"{i + 1}. {name}", font=font_big, fill=color)
-        draw.text((150, y_offset + 40), f"Score: {score}", font=font_small, fill=color)
+        # Score, right-aligned
+        score_text = f"{score:,} pts"
+        score_bbox = text_draw.textbbox((0, 0), score_text, font=font_score)
+        score_w = score_bbox[2] - score_bbox[0]
+        text_draw.text(
+            (row_right - 24 - score_w, row_mid - (score_bbox[3] - score_bbox[1]) / 2 - score_bbox[1]),
+            score_text, font=font_score, fill=(*color, 255) if i < 3 else (220, 220, 226, 255)
+        )
 
-        y_offset += 100
+        y = row_bottom
+
+    composited = Image.alpha_composite(base, overlay)
+    composited = Image.alpha_composite(composited, text_layer).convert("RGB")
 
     buffer = BytesIO()
-    img.save(buffer, format="PNG")
+    composited.save(buffer, format="PNG")
     buffer.seek(0)
 
     return discord.File(buffer, filename="leaderboard.png")
@@ -341,6 +460,14 @@ CREATE TABLE IF NOT EXISTS roblox_cache (
 )
 """)
 
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS teams (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_name TEXT UNIQUE,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
 conn.commit()
 
 def ensure_column(table: str, column: str, definition: str):
@@ -357,6 +484,9 @@ ensure_column("events", "event_start_time", "TEXT")
 ensure_column("events", "reminder_sent", "INTEGER DEFAULT 0")
 ensure_column("events", "leaderboard_message_id", "INTEGER")
 ensure_column("events", "leaderboard_channel_id", "INTEGER")
+ensure_column("events", "team_leaderboard_message_id", "INTEGER")
+ensure_column("events", "team_leaderboard_channel_id", "INTEGER")
+ensure_column("results", "team_id", "INTEGER")
 
 ### ROBLOX CACHE PERSISTENCE ###
 # roblox_username_cache / roblox_avatar_cache stay as in-memory dicts for fast
@@ -826,7 +956,7 @@ async def _event_leadeboard(interaction: Interaction, event_number: int = 0, dis
 
     if generate_image and event_results:
         names = await resolve_display_names(interaction, [row[0] for row in event_results])
-        image = leaderboard_image(event_results, names)
+        image = leaderboard_image(event_results, names, title=f"{event_name} Leaderboard")
         await interaction.followup.send(file=image)
 
 @tree.command(
@@ -916,80 +1046,6 @@ async def _event_set_start_time(interaction: Interaction, day: int, month: int, 
         f"Start time for **{event_name}** set to {start_time.strftime('%B %d, %H:%M')} - "
         f"registered players will get a reminder DM about an hour before ✅"
     )
-
-@tree.command(
-    name="global_leaderboard",
-    description="Display a leaderboard compiling results from multiple events.",
-    guild=GUILD
-)
-@is_allowed()
-async def _global_leadeboard(interaction: Interaction, first_event_number: int = 1, final_event_number: int = 1, display_in_channel: bool = False, generate_image: bool = False):
-    if first_event_number <= 0:
-        await interaction.response.send_message("first_event_number must be greater than 0.", ephemeral=True)
-        return
-
-    if final_event_number <= 0:
-        await interaction.response.send_message("final_event_number must be greater than 0.", ephemeral=True)
-        return
-
-    if final_event_number < first_event_number:
-        await interaction.response.send_message("final_event_number must be greater than first_event_number.", ephemeral=True)
-        return
-
-    cursor.execute("""
-        SELECT id FROM events
-        ORDER BY id
-        LIMIT ? OFFSET ?
-    """, (final_event_number - first_event_number + 1, first_event_number - 1))
-
-    event_ids = [row[0] for row in cursor.fetchall()]
-
-    if not event_ids:
-        await interaction.response.send_message("No events found.", ephemeral=True)
-        return
-
-    placeholders = ",".join("?" for _ in event_ids)
-
-    cursor.execute(f"""
-        SELECT players.discord_id, SUM(results.player_score) as total_score, players.roblox_id
-        FROM results
-        JOIN players ON results.player_id = players.id
-        WHERE results.event_id IN ({placeholders})
-        GROUP BY results.player_id
-        ORDER BY total_score DESC
-        LIMIT 10
-    """, event_ids)
-
-    leaderboard = cursor.fetchall()
-
-    desc = "".join(placement_line(i, row[0], row[1], label="Point") for i, row in enumerate(leaderboard))
-
-    embed = Embed(
-        title=f"🌍 Global Leaderboard - TOP 10 - (Events {first_event_number} → {final_event_number})",
-        description="No results found." if desc == "" else desc
-    )
-
-    await interaction.response.send_message(embed=embed)
-
-    if display_in_channel:
-        existing_message_id = leaderboard_data.get("global_leaderboard_message_id")
-        existing_channel_id = leaderboard_data.get("global_leaderboard_channel_id")
-
-        posted_message = await post_or_update_leaderboard_message(
-            LEADERBOARD_CHANNEL_ID, embed, existing_message_id, existing_channel_id
-        )
-
-        leaderboard_data.update({
-            "global_leaderboard_message_id": posted_message.id,
-            "global_leaderboard_channel_id": posted_message.channel.id,
-        })
-        bot_data.update({"leaderboard_data": leaderboard_data})
-        save_json("bot_data.json", bot_data)
-
-    if generate_image and leaderboard:
-        names = await resolve_display_names(interaction, [row[0] for row in leaderboard])
-        image = leaderboard_image(leaderboard, names)
-        await interaction.followup.send(file=image)
 
 @tree.command(
     name="player_register",
@@ -1201,6 +1257,366 @@ async def _player_roblox_id_update(interaction: Interaction, user: Member, roblo
         print(f"Could not update player results in database: {e}")
 
         await interaction.response.send_message(f"Error occured: {e}", ephemeral=True)
+
+@tree.command(
+    name="player_results_bulk_update",
+    description="Bulk add/update player results for an event from a CSV file (discord_id,player_score[,roblox_id]).",
+    guild=GUILD
+)
+@is_allowed()
+async def _player_results_bulk_update(interaction: Interaction, file: discord.Attachment, event_number: int = 0):
+    event = await require_event(interaction, event_number)
+    if event is None:
+        return
+    event_id, event_name = event[0], event[2]
+
+    if not file.filename.lower().endswith((".csv", ".txt")):
+        await interaction.response.send_message("Please attach a .csv or .txt file.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    try:
+        text = (await file.read()).decode("utf-8-sig")
+    except Exception as e:
+        await interaction.followup.send(f"Could not read attachment: {e}", ephemeral=True)
+        return
+
+    rows = [row for row in csv.reader(StringIO(text)) if row and any(cell.strip() for cell in row)]
+    if rows and rows[0][0].strip().lower() in ("discord_id", "discord id", "id"):
+        rows = rows[1:]  # optional header row
+
+    if not rows:
+        await interaction.followup.send("File is empty.", ephemeral=True)
+        return
+
+    created = updated = 0
+    errors: list[str] = []
+
+    for line_number, row in enumerate(rows, start=1):
+        if len(row) < 2:
+            errors.append(f"Row {line_number}: expected at least discord_id,player_score.")
+            continue
+
+        try:
+            discord_id = int(row[0].strip())
+            player_score = int(row[1].strip())
+        except ValueError:
+            errors.append(f"Row {line_number}: discord_id and player_score must be numbers.")
+            continue
+
+        if player_score < 0:
+            errors.append(f"Row {line_number}: player_score must be >= 0.")
+            continue
+
+        roblox_id = None
+        if len(row) >= 3 and row[2].strip():
+            try:
+                roblox_id = int(row[2].strip())
+            except ValueError:
+                errors.append(f"Row {line_number}: roblox_id must be a number if provided.")
+                continue
+
+        cursor.execute("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
+        player = cursor.fetchone()
+
+        if not player:
+            cursor.execute(
+                "INSERT INTO players (discord_id, roblox_id) VALUES (?, ?)",
+                (discord_id, roblox_id or 0)
+            )
+            cursor.execute("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
+            player = cursor.fetchone()
+        elif roblox_id:
+            cursor.execute("UPDATE players SET roblox_id = ? WHERE discord_id = ?", (roblox_id, discord_id))
+
+        player_id = player[0]
+
+        cursor.execute("SELECT id FROM results WHERE player_id = ? AND event_id = ?", (player_id, event_id))
+        if cursor.fetchone():
+            cursor.execute(
+                "UPDATE results SET player_score = ? WHERE player_id = ? AND event_id = ?",
+                (player_score, player_id, event_id)
+            )
+            updated += 1
+        else:
+            cursor.execute(
+                "INSERT INTO results (player_id, player_score, event_id) VALUES (?, ?, ?)",
+                (player_id, player_score, event_id)
+            )
+            created += 1
+
+    conn.commit()
+
+    summary = f"Bulk update for **{event_name}**: {created} created, {updated} updated"
+    summary += " ✅" if not errors else f", {len(errors)} error(s):\n" + "\n".join(errors[:15])
+    if len(errors) > 15:
+        summary += f"\n...and {len(errors) - 15} more."
+
+    await interaction.followup.send(summary[:2000], ephemeral=True)
+
+@tree.command(
+    name="player_results_bulk_delete",
+    description="Bulk delete player results for an event from a CSV file (one discord_id per line).",
+    guild=GUILD
+)
+@is_admin()
+async def _player_results_bulk_delete(interaction: Interaction, file: discord.Attachment, event_number: int = 0):
+    event = await require_event(interaction, event_number)
+    if event is None:
+        return
+    event_id, event_name = event[0], event[2]
+
+    try:
+        text = (await file.read()).decode("utf-8-sig")
+    except Exception as e:
+        await interaction.response.send_message(f"Could not read attachment: {e}", ephemeral=True)
+        return
+
+    rows = [row for row in csv.reader(StringIO(text)) if row and any(cell.strip() for cell in row)]
+    if rows and rows[0][0].strip().lower() in ("discord_id", "discord id", "id"):
+        rows = rows[1:]  # optional header row
+
+    discord_ids: list[int] = []
+    skipped = 0
+    for row in rows:
+        try:
+            discord_ids.append(int(row[0].strip()))
+        except (ValueError, IndexError):
+            skipped += 1
+
+    if not discord_ids:
+        await interaction.response.send_message("No valid discord_id values found in file.", ephemeral=True)
+        return
+
+    view = ConfirmView(interaction.user.id)
+    warning = f"Delete results for {len(discord_ids)} player(s) in **{event_name}**? This cannot be undone."
+    if skipped:
+        warning += f"\n({skipped} row(s) couldn't be parsed and will be skipped.)"
+    await interaction.response.send_message(warning, view=view, ephemeral=True)
+    await view.wait()
+
+    if not view.confirmed:
+        return
+
+    deleted = 0
+    for discord_id in discord_ids:
+        cursor.execute("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
+        player = cursor.fetchone()
+        if not player:
+            continue
+        cursor.execute("DELETE FROM results WHERE player_id = ? AND event_id = ?", (player[0], event_id))
+        deleted += cursor.rowcount
+
+    conn.commit()
+
+    await interaction.followup.send(f"Deleted results for {deleted} player(s) in **{event_name}** ✅", ephemeral=True)
+
+@tree.command(
+    name="team_add",
+    description="Create a new team.",
+    guild=GUILD
+)
+@is_allowed()
+async def _team_add(interaction: Interaction, name: str):
+    try:
+        cursor.execute("INSERT INTO teams (team_name) VALUES (?)", (name,))
+        conn.commit()
+        await interaction.response.send_message(f"Team **{name}** created ✅")
+    except sqlite3.IntegrityError:
+        await interaction.response.send_message(f"A team named **{name}** already exists.", ephemeral=True)
+
+@tree.command(
+    name="team_remove",
+    description="Delete a team. Members keep their individual results but lose their team tag.",
+    guild=GUILD
+)
+@is_admin()
+async def _team_remove(interaction: Interaction, name: str):
+    cursor.execute("SELECT id FROM teams WHERE team_name = ?", (name,))
+    team = cursor.fetchone()
+    if not team:
+        await interaction.response.send_message(f"Team **{name}** not found.", ephemeral=True)
+        return
+    team_id = team[0]
+
+    view = ConfirmView(interaction.user.id)
+    await interaction.response.send_message(
+        f"Delete team **{name}**? Members keep their individual results but lose their team tag in every event.",
+        view=view,
+        ephemeral=True
+    )
+    await view.wait()
+
+    if not view.confirmed:
+        return
+
+    cursor.execute("UPDATE results SET team_id = NULL WHERE team_id = ?", (team_id,))
+    cursor.execute("DELETE FROM teams WHERE id = ?", (team_id,))
+    conn.commit()
+
+    await interaction.followup.send(f"Team **{name}** deleted ✅", ephemeral=True)
+
+@tree.command(
+    name="team_assign",
+    description="Assign a player to a team for a specific event.",
+    guild=GUILD
+)
+@is_allowed()
+async def _team_assign(interaction: Interaction, user: Member, team: str, event_number: int = 0):
+    event = await require_event(interaction, event_number)
+    if event is None:
+        return
+    event_id, event_name = event[0], event[2]
+
+    cursor.execute("SELECT id FROM teams WHERE team_name = ?", (team,))
+    team_row = cursor.fetchone()
+    if not team_row:
+        await interaction.response.send_message(f"Team **{team}** not found - create it first with /team_add.", ephemeral=True)
+        return
+    team_id = team_row[0]
+
+    cursor.execute("SELECT id FROM players WHERE discord_id = ?", (user.id,))
+    player = cursor.fetchone()
+    if not player:
+        cursor.execute("INSERT INTO players (discord_id) VALUES (?)", (user.id,))
+        conn.commit()
+        cursor.execute("SELECT id FROM players WHERE discord_id = ?", (user.id,))
+        player = cursor.fetchone()
+    player_id = player[0]
+
+    # Team assignment lives on the results row (per event), not the player - a
+    # player can be on a different team, or no team, in each event. Assigning a
+    # team also registers the player for the event (score 0) if they weren't
+    # already, same as /player_register.
+    cursor.execute("SELECT id FROM results WHERE player_id = ? AND event_id = ?", (player_id, event_id))
+    result = cursor.fetchone()
+    if result:
+        cursor.execute("UPDATE results SET team_id = ? WHERE id = ?", (team_id, result[0]))
+    else:
+        cursor.execute(
+            "INSERT INTO results (player_id, player_score, event_id, team_id) VALUES (?, 0, ?, ?)",
+            (player_id, event_id, team_id)
+        )
+    conn.commit()
+
+    await interaction.response.send_message(f"<@{user.id}> assigned to **{team}** for **{event_name}** ✅")
+
+@tree.command(
+    name="team_unassign",
+    description="Remove a player from their team for a specific event.",
+    guild=GUILD
+)
+@is_allowed()
+async def _team_unassign(interaction: Interaction, user: Member, event_number: int = 0):
+    event = await require_event(interaction, event_number)
+    if event is None:
+        return
+    event_id = event[0]
+
+    player = await require_player(interaction, user)
+    if player is None:
+        return
+    player_id = player[0]
+
+    if await require_results(interaction, player_id, event_id) is None:
+        return
+
+    cursor.execute("UPDATE results SET team_id = NULL WHERE player_id = ? AND event_id = ?", (player_id, event_id))
+    conn.commit()
+
+    await interaction.response.send_message(f"<@{user.id}> removed from their team for this event ✅")
+
+@tree.command(
+    name="team_list",
+    description="List all teams and their member counts for an event.",
+    guild=GUILD
+)
+@is_allowed()
+async def _team_list(interaction: Interaction, event_number: int = 0):
+    event = await require_event(interaction, event_number)
+    if event is None:
+        return
+    event_id, event_name = event[0], event[2]
+
+    cursor.execute("""
+        SELECT teams.team_name, COUNT(results.id)
+        FROM teams
+        LEFT JOIN results ON results.team_id = teams.id AND results.event_id = ?
+        GROUP BY teams.id
+        ORDER BY teams.team_name
+    """, (event_id,))
+    teams = cursor.fetchall()
+
+    if not teams:
+        await interaction.response.send_message("No teams created yet.", ephemeral=True)
+        return
+
+    desc = "\n".join(f"**{name}** - {count} member{'s' if count != 1 else ''}" for name, count in teams)
+    await interaction.response.send_message(embed=Embed(title=f"Teams - {event_name}", description=desc))
+
+@tree.command(
+    name="team_leaderboard",
+    description="Display team totals for an event. Players without a team still show up individually.",
+    guild=GUILD
+)
+@is_allowed()
+async def _team_leaderboard(interaction: Interaction, event_number: int = 0, display_in_channel: bool = False):
+    event = await require_event(interaction, event_number)
+    if event is None:
+        return
+    event_id, event_name = event[0], event[2]
+
+    cursor.execute("""
+        SELECT results.team_id, teams.team_name, players.discord_id, results.player_score
+        FROM results
+        JOIN players ON results.player_id = players.id
+        LEFT JOIN teams ON results.team_id = teams.id
+        WHERE results.event_id = ?
+    """, (event_id,))
+    rows = cursor.fetchall()
+
+    # Players on a team get pooled into a team total; players with no team (we
+    # don't force everyone onto one) keep their own individual score and rank
+    # alongside the teams rather than getting dropped from the board.
+    team_totals: dict[int, list] = {}
+    unassigned: list[tuple[int, int]] = []
+
+    for team_id, team_name, discord_id, score in rows:
+        if team_id is not None:
+            if team_id not in team_totals:
+                team_totals[team_id] = [team_name, 0]
+            team_totals[team_id][1] += score
+        else:
+            unassigned.append((discord_id, score))
+
+    combined = [(name, total) for name, total in team_totals.values()]
+    combined += [(f"<@{discord_id}> *(no team)*", score) for discord_id, score in unassigned]
+    combined.sort(key=lambda entry: entry[1], reverse=True)
+
+    desc = "".join(team_placement_line(i, label, score) for i, (label, score) in enumerate(combined))
+    embed = Embed(
+        title=f"🏆 {event_name} Team Leaderboard",
+        description="No results found." if desc == "" else desc
+    )
+    await interaction.response.send_message(embed=embed)
+
+    if display_in_channel:
+        cursor.execute(
+            "SELECT team_leaderboard_message_id, team_leaderboard_channel_id FROM events WHERE id = ?",
+            (event_id,)
+        )
+        existing_message_id, existing_channel_id = cursor.fetchone() or (None, None)
+
+        posted_message = await post_or_update_leaderboard_message(
+            LEADERBOARD_CHANNEL_ID, embed, existing_message_id, existing_channel_id
+        )
+
+        cursor.execute(
+            "UPDATE events SET team_leaderboard_message_id = ?, team_leaderboard_channel_id = ? WHERE id = ?",
+            (posted_message.id, posted_message.channel.id, event_id)
+        )
+        conn.commit()
 
 @tree.error
 async def on_app_command_error(interaction: Interaction, error):
