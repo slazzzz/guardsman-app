@@ -1618,6 +1618,302 @@ async def _team_leaderboard(interaction: Interaction, event_number: int = 0, dis
         )
         conn.commit()
 
+@tree.command(
+    name="team_bulk_add",
+    description="Bulk create teams from a CSV/text file (one team name per line).",
+    guild=GUILD
+)
+@is_allowed()
+async def _team_bulk_add(interaction: Interaction, file: discord.Attachment):
+    if not file.filename.lower().endswith((".csv", ".txt")):
+        await interaction.response.send_message("Please attach a .csv or .txt file.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    try:
+        text = (await file.read()).decode("utf-8-sig")
+    except Exception as e:
+        await interaction.followup.send(f"Could not read attachment: {e}", ephemeral=True)
+        return
+
+    rows = [row for row in csv.reader(StringIO(text)) if row and any(cell.strip() for cell in row)]
+    if rows and rows[0][0].strip().lower() in ("team_name", "team", "name"):
+        rows = rows[1:]  # optional header row
+
+    created = 0
+    errors: list[str] = []
+
+    for line_number, row in enumerate(rows, start=1):
+        name = row[0].strip()
+        if not name:
+            continue
+        try:
+            cursor.execute("INSERT INTO teams (team_name) VALUES (?)", (name,))
+            created += 1
+        except sqlite3.IntegrityError:
+            errors.append(f"Row {line_number}: team **{name}** already exists.")
+
+    conn.commit()
+
+    summary = f"Bulk team creation: {created} created"
+    summary += " ✅" if not errors else f", {len(errors)} skipped:\n" + "\n".join(errors[:15])
+    if len(errors) > 15:
+        summary += f"\n...and {len(errors) - 15} more."
+
+    await interaction.followup.send(summary[:2000], ephemeral=True)
+
+@tree.command(
+    name="team_bulk_remove",
+    description="Bulk delete teams from a CSV/text file (one team name per line). Members keep their results.",
+    guild=GUILD
+)
+@is_admin()
+async def _team_bulk_remove(interaction: Interaction, file: discord.Attachment):
+    try:
+        text = (await file.read()).decode("utf-8-sig")
+    except Exception as e:
+        await interaction.response.send_message(f"Could not read attachment: {e}", ephemeral=True)
+        return
+
+    rows = [row for row in csv.reader(StringIO(text)) if row and any(cell.strip() for cell in row)]
+    if rows and rows[0][0].strip().lower() in ("team_name", "team", "name"):
+        rows = rows[1:]  # optional header row
+
+    names = [row[0].strip() for row in rows if row and row[0].strip()]
+    if not names:
+        await interaction.response.send_message("No team names found in file.", ephemeral=True)
+        return
+
+    view = ConfirmView(interaction.user.id)
+    await interaction.response.send_message(
+        f"Delete {len(names)} team(s)? Members keep their individual results but lose the team tag in every event.",
+        view=view,
+        ephemeral=True
+    )
+    await view.wait()
+
+    if not view.confirmed:
+        return
+
+    deleted = 0
+    not_found: list[str] = []
+
+    for name in names:
+        cursor.execute("SELECT id FROM teams WHERE team_name = ?", (name,))
+        team = cursor.fetchone()
+        if not team:
+            not_found.append(name)
+            continue
+        cursor.execute("UPDATE results SET team_id = NULL WHERE team_id = ?", (team[0],))
+        cursor.execute("DELETE FROM teams WHERE id = ?", (team[0],))
+        deleted += 1
+
+    conn.commit()
+
+    summary = f"Deleted {deleted} team(s)."
+    if not_found:
+        shown = ", ".join(not_found[:15])
+        summary += f" Not found: {shown}" + (f" (+{len(not_found) - 15} more)" if len(not_found) > 15 else "")
+
+    await interaction.followup.send(summary[:2000], ephemeral=True)
+
+@tree.command(
+    name="team_bulk_update",
+    description="Bulk rename teams from a CSV/text file (old_name,new_name).",
+    guild=GUILD
+)
+@is_allowed()
+async def _team_bulk_update(interaction: Interaction, file: discord.Attachment):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    try:
+        text = (await file.read()).decode("utf-8-sig")
+    except Exception as e:
+        await interaction.followup.send(f"Could not read attachment: {e}", ephemeral=True)
+        return
+
+    rows = [row for row in csv.reader(StringIO(text)) if row and any(cell.strip() for cell in row)]
+    if rows and rows[0][0].strip().lower() in ("old_name", "team_name", "team"):
+        rows = rows[1:]  # optional header row
+
+    updated = 0
+    errors: list[str] = []
+
+    for line_number, row in enumerate(rows, start=1):
+        if len(row) < 2:
+            errors.append(f"Row {line_number}: expected old_name,new_name.")
+            continue
+
+        old_name, new_name = row[0].strip(), row[1].strip()
+        if not old_name or not new_name:
+            errors.append(f"Row {line_number}: both old_name and new_name are required.")
+            continue
+
+        cursor.execute("SELECT id FROM teams WHERE team_name = ?", (old_name,))
+        team = cursor.fetchone()
+        if not team:
+            errors.append(f"Row {line_number}: team **{old_name}** not found.")
+            continue
+
+        try:
+            cursor.execute("UPDATE teams SET team_name = ? WHERE id = ?", (new_name, team[0]))
+            updated += 1
+        except sqlite3.IntegrityError:
+            errors.append(f"Row {line_number}: a team named **{new_name}** already exists.")
+
+    conn.commit()
+
+    summary = f"Bulk rename: {updated} updated"
+    summary += " ✅" if not errors else f", {len(errors)} error(s):\n" + "\n".join(errors[:15])
+    if len(errors) > 15:
+        summary += f"\n...and {len(errors) - 15} more."
+
+    await interaction.followup.send(summary[:2000], ephemeral=True)
+
+@tree.command(
+    name="team_bulk_assign",
+    description="Bulk assign players to teams for an event from a CSV file (discord_id,team_name).",
+    guild=GUILD
+)
+@is_allowed()
+async def _team_bulk_assign(interaction: Interaction, file: discord.Attachment, event_number: int = 0):
+    event = await require_event(interaction, event_number)
+    if event is None:
+        return
+    event_id, event_name = event[0], event[2]
+
+    if not file.filename.lower().endswith((".csv", ".txt")):
+        await interaction.response.send_message("Please attach a .csv or .txt file.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    try:
+        text = (await file.read()).decode("utf-8-sig")
+    except Exception as e:
+        await interaction.followup.send(f"Could not read attachment: {e}", ephemeral=True)
+        return
+
+    rows = [row for row in csv.reader(StringIO(text)) if row and any(cell.strip() for cell in row)]
+    if rows and rows[0][0].strip().lower() in ("discord_id", "discord id", "id"):
+        rows = rows[1:]  # optional header row
+
+    assigned = 0
+    errors: list[str] = []
+    team_cache: dict[str, Optional[int]] = {}  # avoids re-querying the same team name every row
+
+    for line_number, row in enumerate(rows, start=1):
+        if len(row) < 2:
+            errors.append(f"Row {line_number}: expected discord_id,team_name.")
+            continue
+
+        try:
+            discord_id = int(row[0].strip())
+        except ValueError:
+            errors.append(f"Row {line_number}: discord_id must be a number.")
+            continue
+
+        team_name = row[1].strip()
+        if not team_name:
+            errors.append(f"Row {line_number}: team_name is required.")
+            continue
+
+        if team_name not in team_cache:
+            cursor.execute("SELECT id FROM teams WHERE team_name = ?", (team_name,))
+            team_row = cursor.fetchone()
+            team_cache[team_name] = team_row[0] if team_row else None
+
+        team_id = team_cache[team_name]
+        if team_id is None:
+            errors.append(f"Row {line_number}: team **{team_name}** not found.")
+            continue
+
+        cursor.execute("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
+        player = cursor.fetchone()
+        if not player:
+            cursor.execute("INSERT INTO players (discord_id) VALUES (?)", (discord_id,))
+            cursor.execute("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
+            player = cursor.fetchone()
+        player_id = player[0]
+
+        cursor.execute("SELECT id FROM results WHERE player_id = ? AND event_id = ?", (player_id, event_id))
+        result = cursor.fetchone()
+        if result:
+            cursor.execute("UPDATE results SET team_id = ? WHERE id = ?", (team_id, result[0]))
+        else:
+            cursor.execute(
+                "INSERT INTO results (player_id, player_score, event_id, team_id) VALUES (?, 0, ?, ?)",
+                (player_id, event_id, team_id)
+            )
+        assigned += 1
+
+    conn.commit()
+
+    summary = f"Bulk team assignment for **{event_name}**: {assigned} assigned"
+    summary += " ✅" if not errors else f", {len(errors)} error(s):\n" + "\n".join(errors[:15])
+    if len(errors) > 15:
+        summary += f"\n...and {len(errors) - 15} more."
+
+    await interaction.followup.send(summary[:2000], ephemeral=True)
+
+@tree.command(
+    name="team_bulk_unassign",
+    description="Bulk remove players from their teams for an event from a CSV file (one discord_id per line).",
+    guild=GUILD
+)
+@is_allowed()
+async def _team_bulk_unassign(interaction: Interaction, file: discord.Attachment, event_number: int = 0):
+    event = await require_event(interaction, event_number)
+    if event is None:
+        return
+    event_id, event_name = event[0], event[2]
+
+    try:
+        text = (await file.read()).decode("utf-8-sig")
+    except Exception as e:
+        await interaction.response.send_message(f"Could not read attachment: {e}", ephemeral=True)
+        return
+
+    rows = [row for row in csv.reader(StringIO(text)) if row and any(cell.strip() for cell in row)]
+    if rows and rows[0][0].strip().lower() in ("discord_id", "discord id", "id"):
+        rows = rows[1:]  # optional header row
+
+    discord_ids: list[int] = []
+    skipped = 0
+    for row in rows:
+        try:
+            discord_ids.append(int(row[0].strip()))
+        except (ValueError, IndexError):
+            skipped += 1
+
+    if not discord_ids:
+        await interaction.response.send_message("No valid discord_id values found in file.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    unassigned = 0
+    for discord_id in discord_ids:
+        cursor.execute("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
+        player = cursor.fetchone()
+        if not player:
+            continue
+        cursor.execute(
+            "UPDATE results SET team_id = NULL WHERE player_id = ? AND event_id = ?",
+            (player[0], event_id)
+        )
+        unassigned += cursor.rowcount
+
+    conn.commit()
+
+    summary = f"Removed team assignment for {unassigned} player(s) in **{event_name}**"
+    if skipped:
+        summary += f" ({skipped} row(s) couldn't be parsed and were skipped)"
+    summary += " ✅"
+
+    await interaction.followup.send(summary[:2000], ephemeral=True)
+
 @tree.error
 async def on_app_command_error(interaction: Interaction, error):
     if isinstance(error, app_commands.errors.CheckFailure):
