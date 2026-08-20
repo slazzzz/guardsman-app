@@ -470,6 +470,10 @@ class JoinEventView(discord.ui.View):
     def __init__(self, event_id: int):
         super().__init__(timeout=None)
         self.event_id = event_id
+        # custom_id must be stable and unique per event so bot.add_view() can
+        # re-attach this view to its button after a restart. Without this,
+        # the button survives on screen but has nothing listening for it.
+        self.join.custom_id = f"join_event_{event_id}"
 
     @discord.ui.button(label="Join Event", style=discord.ButtonStyle.green)
     async def join(self, interaction: Interaction, button: discord.ui.Button):
@@ -1222,6 +1226,16 @@ async def on_ready():
     except Exception as e:
         print(f"Could not synchronize commands: {e}")
     print(f"Bot is ready: {bot.user.name}")
+
+    # Re-register the Join Event button so it keeps working after a restart.
+    # on_ready can fire more than once (e.g. after a reconnect), so guard
+    # against re-adding the same view repeatedly.
+    if not getattr(bot, "_join_view_restored", False):
+        active_event_id = bot_data.get("active_event_data", {}).get("active_event_id")
+        if active_event_id:
+            bot.add_view(JoinEventView(active_event_id))
+            print(f"Restored Join Event view for event {active_event_id} ✅")
+        bot._join_view_restored = True
 
     if not reminder_loop.is_running():
         reminder_loop.start()
