@@ -119,6 +119,20 @@ def get_roblox_id_from_username(username: str) -> Optional[int]:
 
     return None
 
+def get_username_from_roblox_id(roblox_id: int) -> Optional[str]:
+    if roblox_username_cache.get(roblox_id):
+        return roblox_username_cache[roblox_id]
+    try:
+        res = requests.get(f"https://users.roblox.com/v1/users/{roblox_id}", timeout=5)
+        res.raise_for_status()
+        username = res.json().get("name")
+    except (requests.RequestException, ValueError) as e:
+        print(f"Roblox reverse username lookup failed for {roblox_id}: {e}")
+        return None
+    if username:
+        cache_roblox_username(roblox_id, username)
+    return username
+
 def get_avatar_url(roblox_id: int) -> Optional[str]:
     if roblox_avatar_cache.get(roblox_id):
         return roblox_avatar_cache[roblox_id]
@@ -132,7 +146,9 @@ def get_avatar_url(roblox_id: int) -> Optional[str]:
         print(f"Roblox avatar lookup failed for {roblox_id}: {e}")
         return None
 
-    cache_roblox_avatar(roblox_id, image_url)
+    username = get_username_from_roblox_id(roblox_id)
+
+    cache_roblox_avatar(roblox_id, username, image_url)
     return image_url
 
 def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -544,12 +560,12 @@ def cache_roblox_username(roblox_id: int, username: str):
     """, (roblox_id, username))
     conn.commit()
 
-def cache_roblox_avatar(roblox_id: int, avatar_url: str):
+def cache_roblox_avatar(roblox_id: int, username: str, avatar_url: str):
     roblox_avatar_cache[roblox_id] = avatar_url
     cursor.execute("""
-        INSERT INTO roblox_cache (roblox_id, avatar_url, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO roblox_cache (roblox_id, username, avatar_url, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(roblox_id) DO UPDATE SET avatar_url = excluded.avatar_url, updated_at = CURRENT_TIMESTAMP
-    """, (roblox_id, avatar_url))
+    """, (roblox_id, username, avatar_url))
     conn.commit()
 
 load_roblox_cache()
