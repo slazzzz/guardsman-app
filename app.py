@@ -1,5 +1,6 @@
 ### LIBRARIES ###
 
+import asyncio
 import csv
 import discord
 import json
@@ -7,6 +8,7 @@ import logging
 import os
 import requests
 import sqlite3
+import time
 
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -92,6 +94,46 @@ def team_placement_line(i: int, team_name: str, score: int, label: str = "Point"
         return f"{PLACEMENT_EMOJIS[i]} **{place_word} place** - {team_name} - {score} {label}{suffix}\n"
     return f"**{i + 1}{ordinal(i + 1)} place** - {team_name} - {score} {label}{suffix}\n"
 
+### ROBLOX API REQUEST HELPER (429-AWARE) ###
+
+ROBLOX_MAX_RETRIES = 3
+ROBLOX_DEFAULT_BACKOFF_SECONDS = 1.5
+
+def _roblox_request(method: str, url: str, **kwargs) -> Optional[requests.Response]:
+    """Wraps requests.request with retry/backoff for Roblox's rate limiting.
+
+    On a 429, sleeps for the Retry-After header (falling back to a small
+    exponential backoff if the header is missing) and tries again, up to
+    ROBLOX_MAX_RETRIES times. On persistent failure, returns None so callers
+    fall back to cached/placeholder data instead of raising.
+    """
+    kwargs.setdefault("timeout", 5)
+    delay = ROBLOX_DEFAULT_BACKOFF_SECONDS
+
+    for attempt in range(ROBLOX_MAX_RETRIES):
+        try:
+            response = requests.request(method, url, **kwargs)
+        except requests.RequestException as e:
+            print(f"Roblox request failed ({method} {url}): {e}")
+            return None
+
+        if response.status_code == 429:
+            retry_after = response.headers.get("Retry-After")
+            try:
+                wait_seconds = float(retry_after) if retry_after else delay
+            except ValueError:
+                wait_seconds = delay
+            print(f"Roblox API rate-limited us (attempt {attempt + 1}/{ROBLOX_MAX_RETRIES}), "
+                  f"waiting {wait_seconds:.1f}s before retrying: {url}")
+            time.sleep(wait_seconds)
+            delay *= 2  # exponential backoff if Retry-After keeps being absent
+            continue
+
+        return response
+
+    print(f"Roblox request still rate-limited after {ROBLOX_MAX_RETRIES} attempts, giving up: {url}")
+    return None
+
 def get_roblox_id_from_username(username: str) -> Optional[int]:
     if username in roblox_username_cache.values():
         return next((k for k, v in roblox_username_cache.items() if v == username), None)
@@ -104,52 +146,82 @@ def get_roblox_id_from_username(username: str) -> Optional[int]:
         "excludeBannedUsers": True
     }
 
-    try:
-        response = requests.post(url, json=payload, timeout=5)
-    except requests.RequestException as e:
-        print(f"Roblox username lookup failed: {e}")
+    response = _roblox_request("POST", url, json=payload)
+    if response is None or response.status_code != 200:
         return None
 
-    if response.status_code == 200:
-        data = response.json().get("data")
-        if data:
-            roblox_id = data[0].get("id")
-            cache_roblox_username(roblox_id, username)
-            return roblox_id
+    data = response.json().get("data")
+    if data:
+        roblox_id = data[0].get("id")
+        cache_roblox_username(roblox_id, username)
+        return roblox_id
 
     return None
 
-def get_username_from_roblox_id(roblox_id: int) -> Optional[str]:
-    if roblox_username_cache.get(roblox_id):
-        return roblox_username_cache[roblox_id]
-    try:
-        res = requests.get(f"https://users.roblox.com/v1/users/{roblox_id}", timeout=5)
-        res.raise_for_status()
-        username = res.json().get("name")
-    except (requests.RequestException, ValueError) as e:
-        print(f"Roblox reverse username lookup failed for {roblox_id}: {e}")
-        return None
-    if username:
-        cache_roblox_username(roblox_id, username)
-    return username
-
 def get_avatar_url(roblox_id: int) -> Optional[str]:
+    """Single-id avatar lookup, kept for call sites that only need one avatar.
+    For rendering a leaderboard, prefer get_avatar_urls_batch() instead so
+    multiple players are fetched in one Roblox API call."""
     if roblox_avatar_cache.get(roblox_id):
         return roblox_avatar_cache[roblox_id]
 
-    url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={roblox_id}&size=150x150&format=Png&isCircular=false"
+    urls = get_avatar_urls_batch([roblox_id])
+    return urls.get(roblox_id)
 
-    try:
-        res = requests.get(url, timeout=5).json()
-        image_url = res["data"][0]["imageUrl"]
-    except (requests.RequestException, KeyError, IndexError) as e:
-        print(f"Roblox avatar lookup failed for {roblox_id}: {e}")
-        return None
+# Roblox's thumbnails endpoint accepts a batch of userIds in one call; keep
+# each request comfortably under Roblox's own per-request cap.
+ROBLOX_AVATAR_BATCH_SIZE = 50
 
-    username = get_username_from_roblox_id(roblox_id)
+def get_avatar_urls_batch(roblox_ids: list[int]) -> dict[int, str]:
+    """Resolves avatar URLs for many roblox_ids at once, using the cache for
+    anything already known and issuing as few Roblox API calls as possible
+    for the rest (chunked to ROBLOX_AVATAR_BATCH_SIZE ids per request).
 
-    cache_roblox_avatar(roblox_id, username, image_url)
-    return image_url
+    This is the preferred entry point when rendering a leaderboard, since it
+    turns N sequential requests into ceil(N / ROBLOX_AVATAR_BATCH_SIZE).
+    """
+    results: dict[int, str] = {}
+    missing: list[int] = []
+
+    # De-duplicate while preserving a stable order, and skip anything cached.
+    seen: set[int] = set()
+    for roblox_id in roblox_ids:
+        if not roblox_id or roblox_id in seen:
+            continue
+        seen.add(roblox_id)
+        cached = roblox_avatar_cache.get(roblox_id)
+        if cached:
+            results[roblox_id] = cached
+        else:
+            missing.append(roblox_id)
+
+    for i in range(0, len(missing), ROBLOX_AVATAR_BATCH_SIZE):
+        chunk = missing[i:i + ROBLOX_AVATAR_BATCH_SIZE]
+        ids_param = ",".join(str(rid) for rid in chunk)
+        url = (
+            "https://thumbnails.roblox.com/v1/users/avatar-headshot"
+            f"?userIds={ids_param}&size=150x150&format=Png&isCircular=false"
+        )
+
+        response = _roblox_request("GET", url)
+        if response is None or response.status_code != 200:
+            print(f"Roblox batch avatar lookup failed for chunk starting at index {i}")
+            continue
+
+        try:
+            data = response.json().get("data", [])
+        except ValueError as e:
+            print(f"Roblox batch avatar response wasn't JSON: {e}")
+            continue
+
+        for entry in data:
+            roblox_id = entry.get("targetId")
+            image_url = entry.get("imageUrl")
+            if roblox_id and image_url:
+                cache_roblox_avatar(roblox_id, image_url)
+                results[roblox_id] = image_url
+
+    return results
 
 def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     """Loads the bundled font, falling back to Pillow's built-in font if it's missing.
@@ -242,6 +314,10 @@ def leaderboard_image(player_results: list[tuple], display_names: dict[int, str]
     row_right = LEADERBOARD_WIDTH - LEADERBOARD_PADDING
     y = LEADERBOARD_HEADER_HEIGHT + LEADERBOARD_PADDING - LEADERBOARD_ROW_GAP
 
+    # Fetch every avatar this render needs in as few Roblox API calls as
+    # possible, instead of one request per row inside the loop below.
+    avatar_urls = get_avatar_urls_batch([result[2] for result in player_results if result[2]])
+
     for i, result in enumerate(player_results):
         user_id, score, roblox_id = result[0], result[1], result[2]
         name = display_names.get(user_id, f"Unknown ({user_id})")
@@ -281,7 +357,7 @@ def leaderboard_image(player_results: list[tuple], display_names: dict[int, str]
             fill=(*color, 255) if i < 3 else (90, 90, 100, 255)
         )
 
-        avatar_url = get_avatar_url(roblox_id) if roblox_id else None
+        avatar_url = avatar_urls.get(roblox_id) if roblox_id else None
         avatar = None
         if avatar_url:
             try:
@@ -560,12 +636,12 @@ def cache_roblox_username(roblox_id: int, username: str):
     """, (roblox_id, username))
     conn.commit()
 
-def cache_roblox_avatar(roblox_id: int, username: str, avatar_url: str):
+def cache_roblox_avatar(roblox_id: int, avatar_url: str):
     roblox_avatar_cache[roblox_id] = avatar_url
     cursor.execute("""
-        INSERT INTO roblox_cache (roblox_id, username, avatar_url, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO roblox_cache (roblox_id, avatar_url, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(roblox_id) DO UPDATE SET avatar_url = excluded.avatar_url, updated_at = CURRENT_TIMESTAMP
-    """, (roblox_id, username, avatar_url))
+    """, (roblox_id, avatar_url))
     conn.commit()
 
 load_roblox_cache()
@@ -997,7 +1073,12 @@ async def _event_leadeboard(interaction: Interaction, event_number: int = 0, dis
 
     if generate_image and event_results:
         names = await resolve_display_names(interaction, [row[0] for row in event_results])
-        image = leaderboard_image(event_results, names, title=f"{event_name} Leaderboard")
+        # leaderboard_image() makes blocking Roblox API/image requests. Run it in a
+        # worker thread so it can't freeze the bot's single event loop (heartbeats,
+        # other users' commands, etc.) while it waits on the network.
+        image = await asyncio.to_thread(
+            leaderboard_image, event_results, names, f"{event_name} Leaderboard"
+        )
         await interaction.followup.send(file=image)
 
 @tree.command(
