@@ -765,7 +765,7 @@ async def _event_add(interaction: Interaction, name: str, mode: str, type: str, 
         )
         conn.commit()
 
-        await interaction.response.send_message("Event registered ✅")
+        await interaction.response.send_message("Event registered ✅", ephemeral=True)
     except Exception as e:
         print(f"Could not initialize event in database: {e}")
 
@@ -1007,7 +1007,7 @@ async def _event_update(interaction: Interaction, field: str, value: str, event_
         )
         conn.commit()
 
-        await interaction.response.send_message(f"{field} updated ✅")
+        await interaction.response.send_message(f"{field} updated ✅", ephemeral=True)
     except Exception as e:
         print(f"Could not update event field value: {e}")
 
@@ -1039,7 +1039,7 @@ async def _event_form(interaction: Interaction, event_number: int = 0):
 
     await active_event_channel.send(f"Click below to join **{event_name}**!", view=view)
 
-    await interaction.response.send_message(f"Form created for {event_name} ✅")
+    await interaction.response.send_message(f"Form created for {event_name} ✅", ephemeral=True)
 
 @tree.command(
     name="event_set_start_time",
@@ -1121,7 +1121,7 @@ async def _player_register(interaction: Interaction, user: Member, roblox_id: in
         )
         conn.commit()
 
-        await interaction.response.send_message(f"<@{user_id}> registered ✅")
+        await interaction.response.send_message(f"<@{user_id}> registered ✅", ephemeral=True)
     except Exception as e:
         print(f"Could not initialize player results in database: {e}")
 
@@ -1158,7 +1158,7 @@ async def _player_results_update(interaction: Interaction, user: Member, event_n
         )
         conn.commit()
 
-        await interaction.response.send_message(f"Results updated for <@{user.id}> ✅")
+        await interaction.response.send_message(f"Results updated for <@{user.id}> ✅", ephemeral=True)
     except Exception as e:
         print(f"Could not update player results in database: {e}")
 
@@ -1277,7 +1277,7 @@ async def _player_roblox_id_update(interaction: Interaction, user: Member, roblo
         )
         conn.commit()
 
-        await interaction.response.send_message(f"Roblox ID updated for <@{user.id}> ✅")
+        await interaction.response.send_message(f"Roblox ID updated for <@{user.id}> ✅", ephemeral=True)
     except Exception as e:
         print(f"Could not update player results in database: {e}")
 
@@ -1447,7 +1447,7 @@ async def _team_add(interaction: Interaction, name: str):
     try:
         cursor.execute("INSERT INTO teams (team_name) VALUES (?)", (name,))
         conn.commit()
-        await interaction.response.send_message(f"Team **{name}** created ✅")
+        await interaction.response.send_message(f"Team **{name}** created ✅", ephemeral=True)
     except sqlite3.IntegrityError:
         await interaction.response.send_message(f"A team named **{name}** already exists.", ephemeral=True)
 
@@ -1525,7 +1525,7 @@ async def _team_assign(interaction: Interaction, user: Member, team: str, event_
         )
     conn.commit()
 
-    await interaction.response.send_message(f"<@{user.id}> assigned to **{team}** for **{event_name}** ✅")
+    await interaction.response.send_message(f"<@{user.id}> assigned to **{team}** for **{event_name}** ✅", ephemeral=True)
 
 @tree.command(
     name="team_unassign",
@@ -1550,7 +1550,7 @@ async def _team_unassign(interaction: Interaction, user: Member, event_number: i
     cursor.execute("UPDATE results SET team_id = NULL WHERE player_id = ? AND event_id = ?", (player_id, event_id))
     conn.commit()
 
-    await interaction.response.send_message(f"<@{user.id}> removed from their team for this event ✅")
+    await interaction.response.send_message(f"<@{user.id}> removed from their team for this event ✅", ephemeral=True)
 
 @tree.command(
     name="team_list",
