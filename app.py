@@ -468,6 +468,15 @@ CREATE TABLE IF NOT EXISTS teams (
 )
 """)
 
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS seasons (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    season_number INTEGER,
+    started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    ended_at TEXT
+)
+""")
+
 conn.commit()
 
 def ensure_column(table: str, column: str, definition: str):
@@ -487,6 +496,22 @@ ensure_column("events", "leaderboard_channel_id", "INTEGER")
 ensure_column("events", "team_leaderboard_message_id", "INTEGER")
 ensure_column("events", "team_leaderboard_channel_id", "INTEGER")
 ensure_column("results", "team_id", "INTEGER")
+ensure_column("events", "season_id", "INTEGER")
+
+def get_active_season_id() -> int:
+    """Returns the id of the currently open season, bootstrapping Season 1 (and
+    backfilling any pre-existing events into it) the first time this ever runs."""
+    cursor.execute("SELECT id FROM seasons WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1")
+    row = cursor.fetchone()
+    if row:
+        return row[0]
+
+    cursor.execute("INSERT INTO seasons (season_number) VALUES (1)")
+    conn.commit()
+    season_id = cursor.lastrowid
+    cursor.execute("UPDATE events SET season_id = ? WHERE season_id IS NULL", (season_id,))
+    conn.commit()
+    return season_id
 
 ### ROBLOX CACHE PERSISTENCE ###
 # roblox_username_cache / roblox_avatar_cache stay as in-memory dicts for fast
@@ -735,8 +760,8 @@ async def _event_add(interaction: Interaction, name: str, mode: str, type: str, 
 
     try:
         cursor.execute(
-            "INSERT INTO events (event_date, event_name, event_mode, event_type, event_prize) VALUES (?, ?, ?, ?, ?)",
-            (event_date, name, mode, type, prize_pool)
+            "INSERT INTO events (event_date, event_name, event_mode, event_type, event_prize, season_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (event_date, name, mode, type, prize_pool, get_active_season_id())
         )
         conn.commit()
 
@@ -1913,6 +1938,148 @@ async def _team_bulk_unassign(interaction: Interaction, file: discord.Attachment
     summary += " ✅"
 
     await interaction.followup.send(summary[:2000], ephemeral=True)
+
+@tree.command(
+    name="season_current",
+    description="Show info about the current season.",
+    guild=GUILD
+)
+@is_allowed()
+async def _season_current(interaction: Interaction):
+    season_id = get_active_season_id()
+    cursor.execute("SELECT season_number, started_at FROM seasons WHERE id = ?", (season_id,))
+    season_number, started_at = cursor.fetchone()
+
+    cursor.execute("SELECT COUNT(*) FROM events WHERE season_id = ?", (season_id,))
+    event_count = cursor.fetchone()[0]
+
+    embed = Embed(
+        title=f"Season {season_number} (active)",
+        description=f"Started: {started_at}\nEvents so far: {event_count}"
+    )
+    await interaction.response.send_message(embed=embed)
+
+@tree.command(
+    name="season_list",
+    description="List every season, past and current.",
+    guild=GUILD
+)
+@is_allowed()
+async def _season_list(interaction: Interaction):
+    cursor.execute("SELECT season_number, started_at, ended_at FROM seasons ORDER BY id")
+    seasons = cursor.fetchall()
+
+    if not seasons:
+        await interaction.response.send_message("No seasons yet.", ephemeral=True)
+        return
+
+    desc = "\n".join(
+        f"**Season {number}** - {started} → {ended or 'ongoing'}"
+        for number, started, ended in seasons
+    )
+    await interaction.response.send_message(embed=Embed(title="Seasons", description=desc))
+
+@tree.command(
+    name="season_leaderboard",
+    description="Cumulative leaderboard for a season (default: the current one).",
+    guild=GUILD
+)
+@is_allowed()
+async def _season_leaderboard(interaction: Interaction, season_number: int = 0, top: int = 10):
+    if top <= 0:
+        await interaction.response.send_message("top must be greater than 0.", ephemeral=True)
+        return
+
+    if season_number == 0:
+        season_id = get_active_season_id()
+    else:
+        cursor.execute("SELECT id FROM seasons WHERE season_number = ?", (season_number,))
+        row = cursor.fetchone()
+        if not row:
+            await interaction.response.send_message(f"Season {season_number} not found.", ephemeral=True)
+            return
+        season_id = row[0]
+
+    cursor.execute("SELECT season_number, ended_at FROM seasons WHERE id = ?", (season_id,))
+    resolved_number, ended_at = cursor.fetchone()
+
+    cursor.execute("""
+        SELECT players.discord_id, SUM(results.player_score) as total_score
+        FROM results
+        JOIN players ON results.player_id = players.id
+        JOIN events ON results.event_id = events.id
+        WHERE events.season_id = ?
+        GROUP BY results.player_id
+        ORDER BY total_score DESC
+        LIMIT ?
+    """, (season_id, top))
+    leaderboard = cursor.fetchall()
+
+    desc = "".join(placement_line(i, discord_id, score) for i, (discord_id, score) in enumerate(leaderboard))
+    status = "ongoing" if ended_at is None else f"ended {ended_at}"
+    embed = Embed(
+        title=f"🏆 Season {resolved_number} Leaderboard - TOP {top} ({status})",
+        description="No results found." if desc == "" else desc
+    )
+    await interaction.response.send_message(embed=embed)
+
+@tree.command(
+    name="season_reset",
+    description="Close the current season and start a new one. Nothing is deleted - past events keep their data.",
+    guild=GUILD
+)
+@is_admin()
+async def _season_reset(interaction: Interaction, top: int = 10):
+    if top <= 0:
+        await interaction.response.send_message("top must be greater than 0.", ephemeral=True)
+        return
+
+    season_id = get_active_season_id()
+    cursor.execute("SELECT season_number, started_at FROM seasons WHERE id = ?", (season_id,))
+    season_number, started_at = cursor.fetchone()
+
+    cursor.execute("""
+        SELECT players.discord_id, SUM(results.player_score) as total_score
+        FROM results
+        JOIN players ON results.player_id = players.id
+        JOIN events ON results.event_id = events.id
+        WHERE events.season_id = ?
+        GROUP BY results.player_id
+        ORDER BY total_score DESC
+        LIMIT ?
+    """, (season_id, top))
+    leaderboard = cursor.fetchall()
+    desc = "".join(placement_line(i, discord_id, score) for i, (discord_id, score) in enumerate(leaderboard))
+
+    preview_embed = Embed(
+        title=f"⚠️ End Season {season_number}?",
+        description=(
+            f"This closes Season {season_number} (started {started_at}) and opens Season {season_number + 1}. "
+            f"No data is deleted - past events and results stay exactly as they are.\n\n"
+            f"**Top {top} for this season** (hand out rewards from this manually):\n\n"
+            + ("No results found." if desc == "" else desc)
+        )
+    )
+
+    view = ConfirmView(interaction.user.id)
+    await interaction.response.send_message(embed=preview_embed, view=view, ephemeral=True)
+    await view.wait()
+
+    if not view.confirmed:
+        return
+
+    cursor.execute("UPDATE seasons SET ended_at = ? WHERE id = ?", (datetime.now().isoformat(), season_id))
+    cursor.execute("INSERT INTO seasons (season_number) VALUES (?)", (season_number + 1,))
+    conn.commit()
+
+    final_embed = Embed(
+        title=f"🏁 Season {season_number} Final Standings - TOP {top}",
+        description="No results found." if desc == "" else desc
+    )
+    await interaction.followup.send(
+        content=f"Season {season_number} closed. Season {season_number + 1} is now active.",
+        embed=final_embed
+    )
 
 @tree.error
 async def on_app_command_error(interaction: Interaction, error):
