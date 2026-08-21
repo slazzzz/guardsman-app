@@ -690,6 +690,21 @@ async def require_results(interaction: Interaction, player_id: int, event_id: in
 
     return result
 
+def resolve_roblox_ref(raw: str) -> tuple[Optional[int], Optional[str]]:
+    """Parses a CSV cell that may be a numeric roblox_id or a Roblox username.
+    Returns (roblox_id, error_message). error_message is None on success;
+    roblox_id is None for a blank cell (not an error - just "no value given")."""
+    raw = raw.strip()
+    if not raw:
+        return None, None
+    if raw.lstrip("-").isdigit():
+        return int(raw), None
+
+    roblox_id = get_roblox_id_from_username(raw)
+    if roblox_id is None:
+        return None, f"could not resolve Roblox username '{raw}'"
+    return roblox_id, None
+
 ### UI COMPONENTS ###
 
 class JoinEventModal(discord.ui.Modal, title="Join Event"):
@@ -1379,6 +1394,199 @@ async def _player_roblox_id_update(interaction: Interaction, user: Member, roblo
         print(f"Could not update player results in database: {e}")
 
         await interaction.response.send_message(f"Error occured: {e}", ephemeral=True)
+
+@tree.command(
+    name="player_bulk_register",
+    description="Bulk-create players from a file (discord_id[,roblox_id_or_username]).",
+    guild=GUILD
+)
+@is_allowed()
+async def _player_bulk_register(interaction: Interaction, file: discord.Attachment):
+    if not file.filename.lower().endswith((".csv", ".txt")):
+        await interaction.response.send_message("Please attach a .csv or .txt file.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    try:
+        text = (await file.read()).decode("utf-8-sig")
+    except Exception as e:
+        await interaction.followup.send(f"Could not read attachment: {e}", ephemeral=True)
+        return
+
+    rows = [row for row in csv.reader(StringIO(text)) if row and any(cell.strip() for cell in row)]
+    if rows and rows[0][0].strip().lower() in ("discord_id", "discord id", "id"):
+        rows = rows[1:]  # optional header row
+
+    if not rows:
+        await interaction.followup.send("File is empty.", ephemeral=True)
+        return
+
+    created = skipped = 0
+    errors: list[str] = []
+
+    for line_number, row in enumerate(rows, start=1):
+        if not row or not row[0].strip():
+            errors.append(f"Row {line_number}: missing discord_id.")
+            continue
+
+        try:
+            discord_id = int(row[0].strip())
+        except ValueError:
+            errors.append(f"Row {line_number}: discord_id must be a number.")
+            continue
+
+        roblox_id = None
+        if len(row) >= 2 and row[1].strip():
+            roblox_id, resolve_error = resolve_roblox_ref(row[1])
+            if resolve_error:
+                errors.append(f"Row {line_number}: {resolve_error}.")
+                continue
+
+        cursor.execute("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
+        if cursor.fetchone():
+            skipped += 1
+            continue
+
+        try:
+            cursor.execute(
+                "INSERT INTO players (discord_id, roblox_id) VALUES (?, ?)",
+                (discord_id, roblox_id or 0)
+            )
+            created += 1
+        except Exception as e:
+            errors.append(f"Row {line_number}: {e}")
+
+    conn.commit()
+
+    summary = f"Bulk register: {created} created, {skipped} already registered"
+    summary += " ✅" if not errors else f", {len(errors)} error(s):\n" + "\n".join(errors[:15])
+    if len(errors) > 15:
+        summary += f"\n...and {len(errors) - 15} more."
+
+    await interaction.followup.send(summary[:2000], ephemeral=True)
+
+@tree.command(
+    name="player_bulk_update",
+    description="Bulk-update players' Roblox IDs from a file (discord_id,roblox_id_or_username).",
+    guild=GUILD
+)
+@is_admin()
+async def _player_bulk_update(interaction: Interaction, file: discord.Attachment):
+    if not file.filename.lower().endswith((".csv", ".txt")):
+        await interaction.response.send_message("Please attach a .csv or .txt file.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    try:
+        text = (await file.read()).decode("utf-8-sig")
+    except Exception as e:
+        await interaction.followup.send(f"Could not read attachment: {e}", ephemeral=True)
+        return
+
+    rows = [row for row in csv.reader(StringIO(text)) if row and any(cell.strip() for cell in row)]
+    if rows and rows[0][0].strip().lower() in ("discord_id", "discord id", "id"):
+        rows = rows[1:]  # optional header row
+
+    if not rows:
+        await interaction.followup.send("File is empty.", ephemeral=True)
+        return
+
+    updated = not_found = 0
+    errors: list[str] = []
+
+    for line_number, row in enumerate(rows, start=1):
+        if len(row) < 2 or not row[0].strip() or not row[1].strip():
+            errors.append(f"Row {line_number}: expected discord_id,roblox_id_or_username.")
+            continue
+
+        try:
+            discord_id = int(row[0].strip())
+        except ValueError:
+            errors.append(f"Row {line_number}: discord_id must be a number.")
+            continue
+
+        roblox_id, resolve_error = resolve_roblox_ref(row[1])
+        if resolve_error:
+            errors.append(f"Row {line_number}: {resolve_error}.")
+            continue
+        if roblox_id is None:
+            errors.append(f"Row {line_number}: roblox_id_or_username is required.")
+            continue
+
+        cursor.execute("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
+        if not cursor.fetchone():
+            not_found += 1
+            continue
+
+        cursor.execute("UPDATE players SET roblox_id = ? WHERE discord_id = ?", (roblox_id, discord_id))
+        updated += 1
+
+    conn.commit()
+
+    summary = f"Bulk update: {updated} updated, {not_found} not registered"
+    summary += " ✅" if not errors else f", {len(errors)} error(s):\n" + "\n".join(errors[:15])
+    if len(errors) > 15:
+        summary += f"\n...and {len(errors) - 15} more."
+
+    await interaction.followup.send(summary[:2000], ephemeral=True)
+
+@tree.command(
+    name="player_bulk_remove",
+    description="Bulk-remove players and ALL their results from a file (one discord_id per line).",
+    guild=GUILD
+)
+@is_admin()
+async def _player_bulk_remove(interaction: Interaction, file: discord.Attachment):
+    try:
+        text = (await file.read()).decode("utf-8-sig")
+    except Exception as e:
+        await interaction.response.send_message(f"Could not read attachment: {e}", ephemeral=True)
+        return
+
+    rows = [row for row in csv.reader(StringIO(text)) if row and any(cell.strip() for cell in row)]
+    if rows and rows[0][0].strip().lower() in ("discord_id", "discord id", "id"):
+        rows = rows[1:]  # optional header row
+
+    discord_ids: list[int] = []
+    skipped = 0
+    for row in rows:
+        try:
+            discord_ids.append(int(row[0].strip()))
+        except (ValueError, IndexError):
+            skipped += 1
+
+    if not discord_ids:
+        await interaction.response.send_message("No valid discord_id values found in file.", ephemeral=True)
+        return
+
+    view = ConfirmView(interaction.user.id)
+    warning = f"Remove {len(discord_ids)} player(s) and ALL of their event results? This cannot be undone."
+    if skipped:
+        warning += f"\n({skipped} row(s) couldn't be parsed and will be skipped.)"
+    await interaction.response.send_message(warning, view=view, ephemeral=True)
+    await view.wait()
+
+    if not view.confirmed:
+        return
+
+    removed = not_found = 0
+    for discord_id in discord_ids:
+        cursor.execute("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
+        player = cursor.fetchone()
+        if not player:
+            not_found += 1
+            continue
+
+        player_id = player[0]
+        cursor.execute("DELETE FROM results WHERE player_id = ?", (player_id,))
+        cursor.execute("DELETE FROM players WHERE id = ?", (player_id,))
+        removed += 1
+
+    conn.commit()
+
+    await interaction.followup.send(f"Removed {removed} player(s) ({not_found} not found) ✅", ephemeral=True)
 
 @tree.command(
     name="player_results_bulk_update",
