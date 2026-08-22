@@ -1,0 +1,10 @@
+*.db
+*.log
+*.env
+misc/
+player_results/
+team_assign/
+team_add/
+review.txt
+bot_data_main.json
+bot_data.json
