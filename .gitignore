@@ -1,6 +1,7 @@
 *.db
 *.log
 *.env
+*.pyc
 misc/
 player_results/
 team_assign/
