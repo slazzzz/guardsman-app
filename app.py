@@ -834,6 +834,16 @@ class PaginatorView(discord.ui.View):
 
 ### BOT COMMANDS ###
 
+@bot.tree.command(
+    name="ping",
+    description="Checks the bot's latency.",
+    guild=GUILD
+)
+@is_admin()
+async def ping(interaction: discord.Interaction):
+    latency_ms = round(bot.latency * 1000)
+    await interaction.response.send_message(f"🏓 Pong! {latency_ms}ms", ephemeral=True)
+
 @tree.command(
     name="event_add",
     description="Register a new event.",
