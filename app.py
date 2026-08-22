@@ -839,7 +839,7 @@ class PaginatorView(discord.ui.View):
     description="Checks the bot's latency.",
     guild=GUILD
 )
-@is_admin()
+@is_staff()
 async def ping(interaction: discord.Interaction):
     latency_ms = round(bot.latency * 1000)
     await interaction.response.send_message(f"🏓 Pong! {latency_ms}ms", ephemeral=True)
