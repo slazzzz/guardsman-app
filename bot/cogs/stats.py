@@ -78,6 +78,20 @@ def get_or_create_player_id(discord_id: int, roblox_id: int = 0) -> int:
     return cursor.lastrowid
 
 
+def has_roblox_linked(discord_id: int) -> bool:
+    """Whether this member has a nonzero roblox_id on file - used to nudge
+    people toward /roblox_link (see players.py) after a stat/badge submission,
+    since neither /stat_submit nor /badge_submit ever asks for a Roblox
+    account, so a first-time submitter's avatar won't show up on /profile
+    until they link it themselves."""
+    cursor.execute("SELECT roblox_id FROM players WHERE discord_id = ?", (discord_id,))
+    row = cursor.fetchone()
+    return bool(row and row[0])
+
+
+ROBLOX_LINK_HINT = "\n-# Tip: run `/roblox_link` to add your Roblox account so your avatar shows up on `/profile`."
+
+
 def highest_held_role(member: Member, tiered_role_ids: list[int]) -> Optional[discord.Role]:
     """tiered_role_ids is ordered lowest -> highest tier; returns the member's
     highest-tier role from that list they actually hold, or None."""
@@ -225,7 +239,10 @@ class StatsCog(commands.Cog):
             )
             return
 
-        await interaction.followup.send("Submitted for review ✅ - you'll get a DM once staff decide.", ephemeral=True)
+        success_message = "Submitted for review ✅ - you'll get a DM once staff decide."
+        if not has_roblox_linked(interaction.user.id):
+            success_message += ROBLOX_LINK_HINT
+        await interaction.followup.send(success_message, ephemeral=True)
 
     @app_commands.command(name="stat_add", description="Directly set a player's stat (trusted admin, no review needed)")
     @app_commands.guilds(GUILD_ID)
@@ -304,7 +321,10 @@ class StatsCog(commands.Cog):
                     await interaction.followup.send(f"You already have **{badge_name}** on your profile.", ephemeral=True)
                     return
 
-                await interaction.followup.send(f"✅ Verified via your linked role - **{badge_name}** is now on your profile.", ephemeral=True)
+                verdict_message = f"✅ Verified via your linked role - **{badge_name}** is now on your profile."
+                if not has_roblox_linked(interaction.user.id):
+                    verdict_message += ROBLOX_LINK_HINT
+                await interaction.followup.send(verdict_message, ephemeral=True)
                 return
 
         # No role match (either nothing's mapped for this badge, or the
@@ -364,7 +384,10 @@ class StatsCog(commands.Cog):
             )
             return
 
-        await interaction.followup.send("Submitted for staff review ✅ - you'll get a DM once they decide.", ephemeral=True)
+        success_message = "Submitted for staff review ✅ - you'll get a DM once they decide."
+        if not has_roblox_linked(interaction.user.id):
+            success_message += ROBLOX_LINK_HINT
+        await interaction.followup.send(success_message, ephemeral=True)
 
     @app_commands.command(
         name="badge_role_sync",
@@ -479,6 +502,8 @@ class StatsCog(commands.Cog):
             avatar_url = get_avatar_url(roblox_id)
             if avatar_url:
                 embed.set_thumbnail(url=avatar_url)
+        elif member.id == interaction.user.id:
+            embed.set_footer(text="No Roblox account linked yet - run /roblox_link to add your avatar here.")
 
         await interaction.response.send_message(embed=embed)
 

@@ -203,6 +203,35 @@ class PlayersCog(commands.Cog):
 
 
     @app_commands.command(
+        name="roblox_link",
+        description="Link your own Roblox account so your avatar shows up on /profile",
+    )
+    @app_commands.guilds(GUILD_ID)
+    @is_allowed()
+    async def roblox_link(self, interaction: Interaction, roblox_id_or_username: str):
+        roblox_id, error = resolve_roblox_ref(roblox_id_or_username)
+        if error:
+            await interaction.response.send_message(f"Couldn't link that - {error}.", ephemeral=True)
+            return
+        if roblox_id is None:
+            await interaction.response.send_message("Give a Roblox username or numeric ID.", ephemeral=True)
+            return
+
+        cursor.execute("SELECT id FROM players WHERE discord_id = ?", (interaction.user.id,))
+        player = cursor.fetchone()
+        if player:
+            cursor.execute("UPDATE players SET roblox_id = ? WHERE discord_id = ?", (roblox_id, interaction.user.id))
+        else:
+            cursor.execute("INSERT INTO players (discord_id, roblox_id) VALUES (?, ?)", (interaction.user.id, roblox_id))
+        conn.commit()
+
+        await interaction.response.send_message(
+            "Linked ✅ - your Roblox account is set, your avatar will show up on `/profile` now.",
+            ephemeral=True
+        )
+
+
+    @app_commands.command(
         name="player_roblox_id_update",
         description="Update a player's Roblox ID.",
     )
