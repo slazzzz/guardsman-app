@@ -292,40 +292,39 @@ class StatsCog(commands.Cog):
         self,
         interaction: Interaction,
         proof: discord.Attachment,
-        badge_id: Optional[int] = None,
+        badge_id: int,
         proof_2: Optional[discord.Attachment] = None,
         proof_3: Optional[discord.Attachment] = None,
     ):
         await interaction.response.defer(ephemeral=True)
 
-        if badge_id:
-            badge_name = get_badge_name(badge_id)
-            if badge_name is None:
-                await interaction.followup.send(f"Couldn't find a Roblox badge with id `{badge_id}`.", ephemeral=True)
+        badge_name = get_badge_name(badge_id)
+        if badge_name is None:
+            await interaction.followup.send(f"Couldn't find a Roblox badge with id `{badge_id}`.", ephemeral=True)
+            return
+
+        player_id = get_or_create_player_id(interaction.user.id)
+
+        # Role-based check first: if this badge is mapped to a Discord role
+        # and the submitter already holds it, award immediately - no proof,
+        # no queue. member.roles works here since this command is guild-only.
+        linked_role_id = BADGE_ROLE_IDS.get(badge_id)
+        if linked_role_id and any(role.id == linked_role_id for role in interaction.user.roles):
+            try:
+                cursor.execute(
+                    "INSERT INTO player_badges (player_id, badge_name, awarded_by, source) VALUES (?, ?, ?, 'role')",
+                    (player_id, badge_name, interaction.user.id)
+                )
+                conn.commit()
+            except sqlite3.IntegrityError:
+                await interaction.followup.send(f"You already have **{badge_name}** on your profile.", ephemeral=True)
                 return
 
-            player_id = get_or_create_player_id(interaction.user.id)
-
-            # Role-based check first: if this badge is mapped to a Discord role
-            # and the submitter already holds it, award immediately - no proof,
-            # no queue. member.roles works here since this command is guild-only.
-            linked_role_id = BADGE_ROLE_IDS.get(badge_id)
-            if linked_role_id and any(role.id == linked_role_id for role in interaction.user.roles):
-                try:
-                    cursor.execute(
-                        "INSERT INTO player_badges (player_id, badge_name, awarded_by, source) VALUES (?, ?, ?, 'role')",
-                        (player_id, badge_name, interaction.user.id)
-                    )
-                    conn.commit()
-                except sqlite3.IntegrityError:
-                    await interaction.followup.send(f"You already have **{badge_name}** on your profile.", ephemeral=True)
-                    return
-
-                verdict_message = f"✅ Verified via your linked role - **{badge_name}** is now on your profile."
-                if not has_roblox_linked(interaction.user.id):
-                    verdict_message += ROBLOX_LINK_HINT
-                await interaction.followup.send(verdict_message, ephemeral=True)
-                return
+            verdict_message = f"✅ Verified via your linked role - **{badge_name}** is now on your profile."
+            if not has_roblox_linked(interaction.user.id):
+                verdict_message += ROBLOX_LINK_HINT
+            await interaction.followup.send(verdict_message, ephemeral=True)
+            return
 
         # No role match (either nothing's mapped for this badge, or the
         # submitter doesn't currently hold it) - fall back to a
@@ -499,9 +498,9 @@ class StatsCog(commands.Cog):
             embed.add_field(name="Division Roles", value="\n".join(role_lines), inline=False)
 
         if roblox_id:
-            avatar_url = get_avatar_url(roblox_id)
+            avatar_url = get_full_avatar_url(roblox_id)
             if avatar_url:
-                embed.set_thumbnail(url=avatar_url)
+                embed.set_image(url=avatar_url)
         elif member.id == interaction.user.id:
             embed.set_footer(text="No Roblox account linked yet - run /roblox_link to add your avatar here.")
 

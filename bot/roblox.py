@@ -13,6 +13,7 @@ from bot.database import conn, cursor
 
 roblox_username_cache: dict[int, str] = {}
 roblox_avatar_cache: dict[int, str] = {}
+roblox_full_avatar_cache: dict[int, str] = {}
 
 ROBLOX_MAX_RETRIES = 3
 ROBLOX_DEFAULT_BACKOFF_SECONDS = 1.5
@@ -144,13 +145,26 @@ def get_roblox_id_from_username(username: str) -> Optional[int]:
 
 
 def get_avatar_url(roblox_id: int) -> Optional[str]:
-    """Single-id avatar lookup, kept for call sites that only need one avatar.
-    For rendering a leaderboard, prefer get_avatar_urls_batch() instead so
-    multiple players are fetched in one Roblox API call."""
+    """Single-id HEADSHOT lookup, kept for call sites that only need one avatar
+    (e.g. leaderboard rows). For rendering a leaderboard, prefer
+    get_avatar_urls_batch() instead so multiple players are fetched in one
+    Roblox API call. For a full-body avatar (e.g. /profile), use
+    get_full_avatar_url() instead."""
     if roblox_avatar_cache.get(roblox_id):
         return roblox_avatar_cache[roblox_id]
 
     urls = get_avatar_urls_batch([roblox_id])
+    return urls.get(roblox_id)
+
+
+def get_full_avatar_url(roblox_id: int) -> Optional[str]:
+    """Single-id FULL-BODY avatar lookup (as opposed to get_avatar_url()'s
+    headshot crop) - what /profile uses so a member's whole avatar shows up
+    instead of just their face."""
+    if roblox_full_avatar_cache.get(roblox_id):
+        return roblox_full_avatar_cache[roblox_id]
+
+    urls = get_full_avatar_urls_batch([roblox_id])
     return urls.get(roblox_id)
 
 
@@ -211,6 +225,55 @@ def get_avatar_urls_batch(roblox_ids: list[int]) -> dict[int, str]:
     return results
 
 
+def get_full_avatar_urls_batch(roblox_ids: list[int]) -> dict[int, str]:
+    """Same batching/caching strategy as get_avatar_urls_batch(), but against
+    Roblox's full-body avatar-render endpoint instead of the headshot crop.
+    Kept as a separate cache (roblox_full_avatar_cache / full_avatar_url) since
+    a headshot and a full-body render are different images with different URLs -
+    caching them under the same key would mean whichever was fetched last wins."""
+    results: dict[int, str] = {}
+    missing: list[int] = []
+
+    seen: set[int] = set()
+    for roblox_id in roblox_ids:
+        if not roblox_id or roblox_id in seen:
+            continue
+        seen.add(roblox_id)
+        cached = roblox_full_avatar_cache.get(roblox_id)
+        if cached:
+            results[roblox_id] = cached
+        else:
+            missing.append(roblox_id)
+
+    for i in range(0, len(missing), ROBLOX_AVATAR_BATCH_SIZE):
+        chunk = missing[i:i + ROBLOX_AVATAR_BATCH_SIZE]
+        ids_param = ",".join(str(rid) for rid in chunk)
+        url = (
+            "https://thumbnails.roblox.com/v1/users/avatar"
+            f"?userIds={ids_param}&size=420x420&format=Png&isCircular=false"
+        )
+
+        response = _roblox_request("GET", url)
+        if response is None or response.status_code != 200:
+            print(f"Roblox batch full-avatar lookup failed for chunk starting at index {i}")
+            continue
+
+        try:
+            data = response.json().get("data", [])
+        except ValueError as e:
+            print(f"Roblox batch full-avatar response wasn't JSON: {e}")
+            continue
+
+        for entry in data:
+            roblox_id = entry.get("targetId")
+            image_url = entry.get("imageUrl")
+            if roblox_id and image_url:
+                cache_roblox_full_avatar(roblox_id, image_url)
+                results[roblox_id] = image_url
+
+    return results
+
+
 ### ROBLOX CACHE PERSISTENCE ###
 
 ROBLOX_AVATAR_CACHE_TTL_SECONDS = 6 * 60 * 60  # avatars change more often than usernames
@@ -232,6 +295,16 @@ def load_roblox_cache():
         if age_seconds < ROBLOX_AVATAR_CACHE_TTL_SECONDS:
             roblox_avatar_cache[roblox_id] = avatar_url
 
+    cursor.execute("SELECT roblox_id, full_avatar_url, updated_at FROM roblox_cache WHERE full_avatar_url IS NOT NULL")
+    for roblox_id, full_avatar_url, updated_at in cursor.fetchall():
+        try:
+            age_seconds = (now - datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")).total_seconds()
+        except (TypeError, ValueError):
+            age_seconds = float("inf")
+
+        if age_seconds < ROBLOX_AVATAR_CACHE_TTL_SECONDS:
+            roblox_full_avatar_cache[roblox_id] = full_avatar_url
+
 
 def cache_roblox_username(roblox_id: int, username: str):
     roblox_username_cache[roblox_id] = username
@@ -248,6 +321,15 @@ def cache_roblox_avatar(roblox_id: int, avatar_url: str):
         INSERT INTO roblox_cache (roblox_id, avatar_url, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(roblox_id) DO UPDATE SET avatar_url = excluded.avatar_url, updated_at = CURRENT_TIMESTAMP
     """, (roblox_id, avatar_url))
+    conn.commit()
+
+
+def cache_roblox_full_avatar(roblox_id: int, full_avatar_url: str):
+    roblox_full_avatar_cache[roblox_id] = full_avatar_url
+    cursor.execute("""
+        INSERT INTO roblox_cache (roblox_id, full_avatar_url, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(roblox_id) DO UPDATE SET full_avatar_url = excluded.full_avatar_url, updated_at = CURRENT_TIMESTAMP
+    """, (roblox_id, full_avatar_url))
     conn.commit()
 
 

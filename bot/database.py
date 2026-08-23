@@ -189,6 +189,9 @@ ensure_column("player_badges", "source", "TEXT DEFAULT 'manual'")  # 'manual' (a
 # of once per stat. NULL for rows submitted before this existed - those are
 # treated as their own single-row batch (see app.py's restore query).
 ensure_column("stat_submissions", "batch_id", "INTEGER")
+# Full-body avatar image, cached separately from the headshot in avatar_url
+# (leaderboards use the headshot, /profile uses this one).
+ensure_column("roblox_cache", "full_avatar_url", "TEXT")
 
 
 def get_active_season_id() -> int:
