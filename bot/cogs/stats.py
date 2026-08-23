@@ -672,9 +672,9 @@ class StatsCog(commands.Cog):
             embed.add_field(name="Division Roles", value="\n".join(role_lines), inline=False)
 
         if roblox_id:
-            avatar_url = get_full_avatar_url(roblox_id)
+            avatar_url = get_avatar_url(roblox_id)
             if avatar_url:
-                embed.set_image(url=avatar_url)
+                embed.set_thumbnail(url=avatar_url)
         elif is_self:
             embed.set_footer(text="No Roblox account linked yet - run /roblox_link to add your avatar here.")
         else:
