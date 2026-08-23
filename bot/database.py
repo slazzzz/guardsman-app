@@ -192,6 +192,15 @@ ensure_column("stat_submissions", "batch_id", "INTEGER")
 # Full-body avatar image, cached separately from the headshot in avatar_url
 # (leaderboards use the headshot, /profile uses this one).
 ensure_column("roblox_cache", "full_avatar_url", "TEXT")
+# Lets staff pause an auto-updating leaderboard (/leaderboard_stats_disable)
+# without deleting its row - stat_leaderboard_loop skips anything with
+# enabled = 0. Deleting the posted message alone doesn't stop the loop, since
+# it just posts a fresh one next tick - this column is the actual off switch.
+ensure_column("stat_leaderboards", "enabled", "INTEGER DEFAULT 1")
+# Opt-in per board: render as a PNG (leaderboard_image(), heavier - Roblox
+# avatar fetches + a Pillow render every tick) instead of the default text
+# embed. Off by default since a busy board on a short interval can add up.
+ensure_column("stat_leaderboards", "use_image", "INTEGER DEFAULT 0")
 
 
 def get_active_season_id() -> int:

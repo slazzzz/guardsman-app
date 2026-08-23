@@ -3,6 +3,7 @@
 from io import BytesIO
 from typing import Optional
 
+import asyncio
 import discord
 import requests
 from discord import Embed, Interaction
@@ -305,11 +306,14 @@ async def build_stat_leaderboard_embed(guild: Optional[discord.Guild], stat_type
 
 async def build_stat_leaderboard_image(guild: Optional[discord.Guild], stat_type: str) -> Optional[discord.File]:
     """The on-request PNG version (e.g. from /profile or /leaderboard_stats image),
-    rendered on demand rather than kept in sync automatically - see stats.py."""
+    also usable from the auto-update loop for boards with use_image = 1 - see
+    stats.py and tasks.py. leaderboard_image() makes blocking Roblox API/image
+    requests, so it's run in a worker thread here (once, for every caller)
+    rather than each call site having to remember to do that itself."""
     if stat_type not in STAT_TYPES:
         return None
 
     label, unit = STAT_TYPES[stat_type]
     rows = get_stat_leaderboard_rows(stat_type)
     names = await resolve_display_names_for_guild(guild, [row[0] for row in rows])
-    return leaderboard_image(rows, names, title=label, unit=unit)
+    return await asyncio.to_thread(leaderboard_image, rows, names, label, unit)

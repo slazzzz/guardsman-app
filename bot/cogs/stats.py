@@ -24,7 +24,14 @@
 #   role the member already holds and displays it.
 # /leaderboard_stats_setup -> registers a channel + interval for a stat_type
 #   so tasks.py's stat_leaderboard_loop keeps it updated automatically.
-# /leaderboard_stats image -> on-demand PNG version of any stat leaderboard.
+#   use_image=True switches that board to a rendered PNG instead of a text
+#   embed (heavier per tick - Roblox avatar fetches + a Pillow render - so
+#   it's opt-in). Re-running setup on a disabled board re-enables it.
+# /leaderboard_stats_disable, /leaderboard_stats_enable -> pause/resume a
+#   board's auto-updates (staff). Deleting the posted message by hand does
+#   NOT stop the loop - it just posts a fresh one next tick - disable is the
+#   actual off switch.
+# /leaderboard_stats_image -> on-demand PNG version of any stat leaderboard.
 
 from typing import Optional
 
@@ -145,11 +152,6 @@ class StatsCog(commands.Cog):
         proof_3: Optional[discord.Attachment] = None,
         proof_4: Optional[discord.Attachment] = None,
         proof_5: Optional[discord.Attachment] = None,
-        proof_6: Optional[discord.Attachment] = None,
-        proof_7: Optional[discord.Attachment] = None,
-        proof_8: Optional[discord.Attachment] = None,
-        proof_9: Optional[discord.Attachment] = None,
-        proof_10: Optional[discord.Attachment] = None,
     ):
         # Left blank (None) means "not submitting this one" - unlike a 0-means-
         # skip convention, this doesn't break stats where 0 is a real, valid
@@ -189,7 +191,7 @@ class StatsCog(commands.Cog):
             )
             return
 
-        proofs = [a for a in (proof, proof_2, proof_3, proof_4, proof_5, proof_6, proof_7, proof_8, proof_9, proof_10) if a is not None]
+        proofs = [a for a in (proof, proof_2, proof_3, proof_4, proof_5) if a is not None]
         player_id = get_or_create_player_id(interaction.user.id)
         proof_url = "\n".join(a.url for a in proofs)
 
@@ -503,9 +505,9 @@ class StatsCog(commands.Cog):
             embed.add_field(name="Division Roles", value="\n".join(role_lines), inline=False)
 
         if roblox_id:
-            avatar_url = get_avatar_url(roblox_id)
+            avatar_url = get_full_avatar_url(roblox_id)
             if avatar_url:
-                embed.set_thumbnail(url=avatar_url)
+                embed.set_image(url=avatar_url)
         elif member.id == interaction.user.id:
             embed.set_footer(text="No Roblox account linked yet - run /roblox_link to add your avatar here.")
 
@@ -514,6 +516,9 @@ class StatsCog(commands.Cog):
     @app_commands.command(name="leaderboard_stats_setup", description="Set an auto-updating leaderboard channel for a stat (staff)")
     @app_commands.guilds(GUILD_ID)
     @app_commands.choices(stat_type=STAT_CHOICES)
+    @app_commands.describe(
+        use_image="Post a rendered image instead of a text embed - heavier to generate every tick, so opt in deliberately"
+    )
     @is_admin_or_staff()
     async def leaderboard_stats_setup(
         self,
@@ -521,31 +526,92 @@ class StatsCog(commands.Cog):
         stat_type: app_commands.Choice[str],
         channel: discord.TextChannel,
         interval_minutes: int = 60,
+        use_image: bool = False,
     ):
         if interval_minutes < 5:
             await interaction.response.send_message("interval_minutes must be at least 5.", ephemeral=True)
             return
 
+        await interaction.response.defer(ephemeral=True)
+
+        # enabled = 1 unconditionally, so re-running setup on a previously
+        # /leaderboard_stats_disable'd board re-enables it too.
         cursor.execute("""
-            INSERT INTO stat_leaderboards (stat_type, channel_id, update_interval_minutes)
-            VALUES (?, ?, ?)
+            INSERT INTO stat_leaderboards (stat_type, channel_id, update_interval_minutes, use_image, enabled)
+            VALUES (?, ?, ?, ?, 1)
             ON CONFLICT(stat_type) DO UPDATE SET
-                channel_id = excluded.channel_id, update_interval_minutes = excluded.update_interval_minutes
-        """, (stat_type.value, channel.id, interval_minutes))
+                channel_id = excluded.channel_id, update_interval_minutes = excluded.update_interval_minutes,
+                use_image = excluded.use_image, enabled = 1
+        """, (stat_type.value, channel.id, interval_minutes, int(use_image)))
         conn.commit()
 
-        embed = await build_stat_leaderboard_embed(interaction.guild, stat_type.value)
-        message = await channel.send(embed=embed)
+        if use_image:
+            file = await build_stat_leaderboard_image(interaction.guild, stat_type.value)
+            message = await channel.send(file=file)
+        else:
+            embed = await build_stat_leaderboard_embed(interaction.guild, stat_type.value)
+            message = await channel.send(embed=embed)
+
         cursor.execute(
             "UPDATE stat_leaderboards SET message_id = ?, last_updated_at = CURRENT_TIMESTAMP WHERE stat_type = ?",
             (message.id, stat_type.value)
         )
         conn.commit()
 
-        await interaction.response.send_message(
-            f"**{stat_type.name}** leaderboard will now auto-update in {channel.mention} every {interval_minutes} minutes.",
+        mode_note = " as an image" if use_image else ""
+        await interaction.followup.send(
+            f"**{stat_type.name}** leaderboard will now auto-update in {channel.mention}{mode_note} every {interval_minutes} minutes.",
             ephemeral=True
         )
+
+    @app_commands.command(
+        name="leaderboard_stats_disable",
+        description="Stop an auto-updating leaderboard from refreshing (staff). Deleting its message alone won't stop it.",
+    )
+    @app_commands.guilds(GUILD_ID)
+    @app_commands.choices(stat_type=STAT_CHOICES)
+    @is_admin_or_staff()
+    async def leaderboard_stats_disable(self, interaction: Interaction, stat_type: app_commands.Choice[str]):
+        cursor.execute("SELECT enabled FROM stat_leaderboards WHERE stat_type = ?", (stat_type.value,))
+        row = cursor.fetchone()
+        if not row:
+            await interaction.response.send_message(f"**{stat_type.name}** was never set up with `/leaderboard_stats_setup`.", ephemeral=True)
+            return
+        if not row[0]:
+            await interaction.response.send_message(f"**{stat_type.name}** is already disabled.", ephemeral=True)
+            return
+
+        cursor.execute("UPDATE stat_leaderboards SET enabled = 0 WHERE stat_type = ?", (stat_type.value,))
+        conn.commit()
+
+        await interaction.response.send_message(
+            f"**{stat_type.name}** will stop auto-updating. Its last posted message is left as-is - "
+            f"delete it yourself if you don't want it lingering. Run `/leaderboard_stats_setup` again to resume.",
+            ephemeral=True
+        )
+
+    @app_commands.command(
+        name="leaderboard_stats_enable",
+        description="Resume an auto-updating leaderboard previously stopped with /leaderboard_stats_disable (staff)",
+    )
+    @app_commands.guilds(GUILD_ID)
+    @app_commands.choices(stat_type=STAT_CHOICES)
+    @is_admin_or_staff()
+    async def leaderboard_stats_enable(self, interaction: Interaction, stat_type: app_commands.Choice[str]):
+        cursor.execute("SELECT enabled, channel_id FROM stat_leaderboards WHERE stat_type = ?", (stat_type.value,))
+        row = cursor.fetchone()
+        if not row:
+            await interaction.response.send_message(f"**{stat_type.name}** was never set up - use `/leaderboard_stats_setup` instead.", ephemeral=True)
+            return
+        if row[0]:
+            await interaction.response.send_message(f"**{stat_type.name}** is already enabled.", ephemeral=True)
+            return
+
+        cursor.execute("UPDATE stat_leaderboards SET enabled = 1 WHERE stat_type = ?", (stat_type.value,))
+        conn.commit()
+
+        channel_mention = f"<#{row[1]}>"
+        await interaction.response.send_message(f"**{stat_type.name}** will resume auto-updating in {channel_mention}.", ephemeral=True)
 
     @app_commands.command(name="leaderboard_stats_image", description="Render a stat leaderboard as an image, on demand")
     @app_commands.guilds(GUILD_ID)

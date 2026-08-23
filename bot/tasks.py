@@ -8,7 +8,7 @@ from discord.ext import tasks
 
 from bot.client import bot
 from bot.database import conn, cursor
-from bot.leaderboard import build_stat_leaderboard_embed
+from bot.leaderboard import build_stat_leaderboard_embed, build_stat_leaderboard_image
 
 REMINDER_WINDOW = timedelta(hours=1)
 STAT_LEADERBOARD_TICK_MINUTES = 5
@@ -83,25 +83,27 @@ async def before_reminder_loop():
 
 @tasks.loop(minutes=STAT_LEADERBOARD_TICK_MINUTES)
 async def stat_leaderboard_loop():
-    """Ticks every STAT_LEADERBOARD_TICK_MINUTES and re-renders any configured
-    stat leaderboard whose own update_interval_minutes has elapsed since it was
-    last posted. The tick interval is deliberately shorter than most boards'
-    update_interval so each board's actual cadence stays close to what staff
-    configured via /leaderboard_stats_setup, without a separate asyncio task
-    per board."""
+    """Ticks every STAT_LEADERBOARD_TICK_MINUTES and re-renders any enabled
+    stat leaderboard (see stat_leaderboards.enabled, toggled via
+    /leaderboard_stats_disable and /leaderboard_stats_enable) whose own
+    update_interval_minutes has elapsed since it was last posted. The tick
+    interval is deliberately shorter than most boards' update_interval so each
+    board's actual cadence stays close to what staff configured via
+    /leaderboard_stats_setup, without a separate asyncio task per board."""
     now = datetime.now()
 
     try:
         cursor.execute("""
-            SELECT stat_type, channel_id, message_id, update_interval_minutes, last_updated_at
+            SELECT stat_type, channel_id, message_id, update_interval_minutes, last_updated_at, use_image
             FROM stat_leaderboards
+            WHERE enabled = 1
         """)
         boards = cursor.fetchall()
     except sqlite3.Error as e:
         print(f"stat_leaderboard_loop: could not query stat_leaderboards, skipping this tick: {e}")
         return
 
-    for stat_type, channel_id, message_id, interval_minutes, last_updated_at in boards:
+    for stat_type, channel_id, message_id, interval_minutes, last_updated_at, use_image in boards:
         if last_updated_at:
             try:
                 last_updated = datetime.strptime(last_updated_at, "%Y-%m-%d %H:%M:%S")
@@ -112,21 +114,39 @@ async def stat_leaderboard_loop():
 
         try:
             channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
-            embed = await build_stat_leaderboard_embed(channel.guild, stat_type)
-            if embed is None:
-                continue
 
-            message = None
-            if message_id:
-                try:
-                    message = await channel.fetch_message(message_id)
-                except (discord.NotFound, discord.Forbidden):
-                    message = None
+            if use_image:
+                file = await build_stat_leaderboard_image(channel.guild, stat_type)
+                if file is None:
+                    continue
 
-            if message:
-                await message.edit(embed=embed)
+                message = None
+                if message_id:
+                    try:
+                        message = await channel.fetch_message(message_id)
+                    except (discord.NotFound, discord.Forbidden):
+                        message = None
+
+                if message:
+                    await message.edit(attachments=[file])
+                else:
+                    message = await channel.send(file=file)
             else:
-                message = await channel.send(embed=embed)
+                embed = await build_stat_leaderboard_embed(channel.guild, stat_type)
+                if embed is None:
+                    continue
+
+                message = None
+                if message_id:
+                    try:
+                        message = await channel.fetch_message(message_id)
+                    except (discord.NotFound, discord.Forbidden):
+                        message = None
+
+                if message:
+                    await message.edit(embed=embed)
+                else:
+                    message = await channel.send(embed=embed)
 
             cursor.execute(
                 "UPDATE stat_leaderboards SET message_id = ?, last_updated_at = CURRENT_TIMESTAMP WHERE stat_type = ?",
