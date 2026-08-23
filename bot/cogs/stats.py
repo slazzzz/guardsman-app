@@ -230,6 +230,7 @@ class StatsCog(commands.Cog):
     @app_commands.command(name="stat_add", description="Directly set a player's stat (trusted admin, no review needed)")
     @app_commands.guilds(GUILD_ID)
     @app_commands.choices(stat_type=STAT_CHOICES)
+    @is_admin()
     @is_staff()
     async def stat_add(self, interaction: Interaction, user: Member, stat_type: app_commands.Choice[str], value: int):
         if value < 0:
@@ -250,6 +251,7 @@ class StatsCog(commands.Cog):
 
     @app_commands.command(name="badge_add", description="Award a badge to a player's profile (trusted admin)")
     @app_commands.guilds(GUILD_ID)
+    @is_admin()
     @is_staff()
     async def badge_add(self, interaction: Interaction, user: Member, badge_name: str):
         player_id = get_or_create_player_id(user.id)
@@ -371,6 +373,7 @@ class StatsCog(commands.Cog):
         description="Re-check a member's badge roles and award any matching badges (staff)"
     )
     @app_commands.guilds(GUILD_ID)
+    @is_admin()
     @is_staff()
     async def badge_role_sync(self, interaction: Interaction, user: Member):
         if not BADGE_ROLE_IDS:
@@ -415,6 +418,7 @@ class StatsCog(commands.Cog):
 
     @app_commands.command(name="badge_remove", description="Remove a badge from a player's profile (trusted admin)")
     @app_commands.guilds(GUILD_ID)
+    @is_admin()
     @is_staff()
     async def badge_remove(self, interaction: Interaction, user: Member, badge_name: str):
         player_id = get_or_create_player_id(user.id)
@@ -485,6 +489,7 @@ class StatsCog(commands.Cog):
     @app_commands.command(name="leaderboard_stats_setup", description="Set an auto-updating leaderboard channel for a stat (staff)")
     @app_commands.guilds(GUILD_ID)
     @app_commands.choices(stat_type=STAT_CHOICES)
+    @is_admin()
     @is_staff()
     async def leaderboard_stats_setup(
         self,
@@ -521,6 +526,7 @@ class StatsCog(commands.Cog):
     @app_commands.command(name="leaderboard_stats_image", description="Render a stat leaderboard as an image, on demand")
     @app_commands.guilds(GUILD_ID)
     @app_commands.choices(stat_type=STAT_CHOICES)
+    @is_admin()
     @is_staff()
     async def leaderboard_stats_image(self, interaction: Interaction, stat_type: app_commands.Choice[str]):
         await interaction.response.defer()

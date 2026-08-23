@@ -20,6 +20,7 @@ class TeamsCog(commands.Cog):
         description="Create a new team.",
     )
     @app_commands.guilds(GUILD_ID)
+    @is_admin()
     @is_staff()
     async def team_add(self, interaction: Interaction, name: str):
         try:
@@ -35,6 +36,7 @@ class TeamsCog(commands.Cog):
         description="Delete a team. Members keep their individual results but lose their team tag.",
     )
     @app_commands.guilds(GUILD_ID)
+    @is_admin()
     @is_staff()
     async def team_remove(self, interaction: Interaction, name: str):
         cursor.execute("SELECT id FROM teams WHERE team_name = ?", (name,))
@@ -67,6 +69,7 @@ class TeamsCog(commands.Cog):
         description="Assign a player to a team for a specific event.",
     )
     @app_commands.guilds(GUILD_ID)
+    @is_admin()
     @is_staff()
     async def team_assign(self, interaction: Interaction, user: Member, team: str, event_number: int = 0):
         event = await require_event(interaction, event_number)
@@ -113,6 +116,7 @@ class TeamsCog(commands.Cog):
         description="Remove a player from their team for a specific event.",
     )
     @app_commands.guilds(GUILD_ID)
+    @is_admin()
     @is_staff()
     async def team_unassign(self, interaction: Interaction, user: Member, event_number: int = 0):
         event = await require_event(interaction, event_number)
@@ -139,6 +143,7 @@ class TeamsCog(commands.Cog):
         description="List all teams and their member counts for an event.",
     )
     @app_commands.guilds(GUILD_ID)
+    @is_admin()
     @is_staff()
     async def team_list(self, interaction: Interaction, event_number: int = 0):
         event = await require_event(interaction, event_number)
@@ -168,6 +173,7 @@ class TeamsCog(commands.Cog):
         description="Display team totals for an event. Players without a team still show up individually.",
     )
     @app_commands.guilds(GUILD_ID)
+    @is_admin()
     @is_staff()
     async def team_leaderboard(self, interaction: Interaction, event_number: int = 0, display_in_channel: bool = False):
         event = await require_event(interaction, event_number)

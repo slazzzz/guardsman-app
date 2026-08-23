@@ -20,6 +20,7 @@ class PlayersCog(commands.Cog):
         description="Register a player to the active event",
     )
     @app_commands.guilds(GUILD_ID)
+    @is_admin()
     @is_staff()
     async def player_register(self, interaction: Interaction, user: Member, roblox_id: int = 0, event_number: int = 0):
         event = await require_event(interaction, event_number)
@@ -76,6 +77,7 @@ class PlayersCog(commands.Cog):
         description="Update a player's score in an event",
     )
     @app_commands.guilds(GUILD_ID)
+    @is_admin()
     @is_staff()
     async def player_results_update(self, interaction: Interaction, user: Member, event_number: int = 0, player_score: int = 0):
         if player_score < 0:
@@ -207,6 +209,7 @@ class PlayersCog(commands.Cog):
         description="Update a player's Roblox ID.",
     )
     @app_commands.guilds(GUILD_ID)
+    @is_admin()
     @is_staff()
     async def player_roblox_id_update(self, interaction: Interaction, user: Member, roblox_id: int):
         if roblox_id <= 0:
