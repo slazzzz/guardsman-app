@@ -2,13 +2,16 @@
 # /stat_submit -> fill in whichever stats you have proof for in one go (leave
 #   the rest blank - don't put 0, that's a real value for stats like deaths).
 #   Queued as one row per filled-in stat in stat_submissions, all sharing a
-#   batch_id, posted to STATS_REVIEW_CHANNEL_ID as a single message with a
-#   StatBatchSubmissionReviewView so staff approve/reject the whole batch at once.
+#   batch_id, posted to STATS_REVIEW_CHANNEL_ID (pinging guild_data.staff_roles)
+#   as a single message with a StatBatchSubmissionReviewView so staff
+#   approve/reject the whole batch at once. Approve/Reject opens a small modal
+#   for an optional reason, which gets DMed to the submitter alongside the verdict.
 # /stat_add -> trusted-admin direct write, bypasses the queue entirely.
 # /badge_submit -> auto-awards if the submitter already holds the Discord role
 #   linked to that badge in badge_role_ids; otherwise falls into a
-#   staff-reviewed queue (badge_submissions) same as before, just without the
-#   Roblox website ownership check (too unreliable - see roblox.py history).
+#   staff-reviewed queue (badge_submissions, also pinging staff_roles) same as
+#   before, just without the Roblox website ownership check (too unreliable -
+#   see roblox.py history). Same optional-reason-on-review as /stat_submit.
 # /badge_role_sync -> staff-run: re-checks one member's currently-held roles
 #   against badge_role_ids and awards anything that matches but isn't on their
 #   profile yet. Needed because those roles are granted manually and can go
@@ -36,6 +39,13 @@ STAT_CHOICES = [
     app_commands.Choice(name=label, value=key)
     for key, (label, _unit) in STAT_TYPES.items()
 ]
+
+# Pings whichever staff roles are configured (guild_data.staff_roles) so a new
+# submission actually gets noticed instead of sitting silently in the review
+# channel. Empty string (no content) if none are configured.
+STAFF_PING_CONTENT = " ".join(f"<@&{role_id}>" for role_id in STAFF_ROLES)
+STAFF_PING_ALLOWED_MENTIONS = discord.AllowedMentions(roles=True, users=False, everyone=False)
+
 
 # Discord slash commands can't take a variable-length list of attachments -
 # each has to be its own named, optional parameter. Three covers "a couple
@@ -90,15 +100,8 @@ class StatsCog(commands.Cog):
     @app_commands.describe(
         hadal_wins=f"{STAT_TYPES['hadal_wins'][0]} - leave blank if you're not submitting this one",
         endless_record=f"{STAT_TYPES['endless_record'][0]} - leave blank if you're not submitting this one",
-        modifier_wins=f"{STAT_TYPES['modifier_wins'][0]} - leave blank if you're not submitting this one",
+        modifier_runs=f"{STAT_TYPES['modifier_runs'][0]} - leave blank if you're not submitting this one",
         death_count=f"{STAT_TYPES['death_count'][0]} - leave blank if you're not submitting this one",
-        heartburn_score=f"{STAT_TYPES['heartburn_score'][0]} - leave blank if you're not submitting this one",
-        heartburn_wins=f"{STAT_TYPES['heartburn_wins'][0]} - leave blank if you're not submitting this one",
-        raveyard_wins=f"{STAT_TYPES['raveyard_wins'][0]} - leave blank if you're not submitting this one",
-        hunted_wins=f"{STAT_TYPES['hunted_wins'][0]} - leave blank if you're not submitting this one",
-        firewall_record=f"{STAT_TYPES['firewall_record'][0]} - leave blank if you're not submitting this one",
-        robux_spent=f"{STAT_TYPES['robux_spent'][0]} - leave blank if you're not submitting this one",
-        max_modifier_percentage=f"{STAT_TYPES['max_modifier_percentage'][0]} - leave blank if you're not submitting this one",
         proof="Screenshot(s) covering whichever stat(s) you filled in above",
     )
     async def stat_submit(
@@ -107,6 +110,7 @@ class StatsCog(commands.Cog):
         proof: discord.Attachment,
         hadal_wins: Optional[int] = None,
         endless_record: Optional[int] = None,
+        modifier_runs: Optional[int] = None,
         death_count: Optional[int] = None,
         modifier_wins: Optional[int] = None,
         heartburn_score: Optional[int] = None,
@@ -127,6 +131,7 @@ class StatsCog(commands.Cog):
         submitted = {
             "hadal_wins": hadal_wins,
             "endless_record": endless_record,
+            "modifier_runs": modifier_runs,
             "death_count": death_count,
             "modifier_wins": modifier_wins,
             "heartburn_score": heartburn_score,
@@ -199,7 +204,13 @@ class StatsCog(commands.Cog):
         try:
             review_channel = self.bot.get_channel(STATS_REVIEW_CHANNEL_ID) or await self.bot.fetch_channel(STATS_REVIEW_CHANNEL_ID)
             files = await attachments_to_files(proofs)
-            await review_channel.send(embed=review_embed, files=files, view=StatBatchSubmissionReviewView(submission_ids))
+            await review_channel.send(
+                content=STAFF_PING_CONTENT or None,
+                embed=review_embed,
+                files=files,
+                view=StatBatchSubmissionReviewView(submission_ids),
+                allowed_mentions=STAFF_PING_ALLOWED_MENTIONS,
+            )
         except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
             print(f"Could not post submission batch #{batch_id} for review: {e}")
             await interaction.followup.send(
@@ -330,7 +341,13 @@ class StatsCog(commands.Cog):
         try:
             review_channel = self.bot.get_channel(STATS_REVIEW_CHANNEL_ID) or await self.bot.fetch_channel(STATS_REVIEW_CHANNEL_ID)
             files = await attachments_to_files(proofs)
-            await review_channel.send(embed=review_embed, files=files, view=BadgeSubmissionReviewView(submission_id))
+            await review_channel.send(
+                content=STAFF_PING_CONTENT or None,
+                embed=review_embed,
+                files=files,
+                view=BadgeSubmissionReviewView(submission_id),
+                allowed_mentions=STAFF_PING_ALLOWED_MENTIONS,
+            )
         except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
             print(f"Could not post badge submission #{submission_id} for review: {e}")
             await interaction.followup.send(
@@ -407,7 +424,6 @@ class StatsCog(commands.Cog):
 
     @app_commands.command(name="profile", description="Show a division member's Pressure stats card")
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
     async def profile(self, interaction: Interaction, user: Optional[Member] = None):
         member = user or interaction.user
 

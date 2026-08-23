@@ -151,6 +151,29 @@ class PaginatorView(discord.ui.View):
         await interaction.response.edit_message(embed=self.embeds[self.index], view=self)
 
 
+class ReviewReasonModal(discord.ui.Modal):
+    """Optional-reason popup shown after a staff member presses Approve/Reject
+    on a stat or badge submission. Whatever's typed here (or nothing) gets
+    passed straight through to the review view's _finalize() so it can include
+    it in the DM sent to the submitter and in the edited review embed."""
+
+    reason = discord.ui.TextInput(
+        label="Reason (optional)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Shown to the submitter in their DM - leave blank to skip",
+        required=False,
+        max_length=500,
+    )
+
+    def __init__(self, *, approved: bool, finalize_callback):
+        super().__init__(title="Approve submission" if approved else "Reject submission")
+        self.approved = approved
+        self._finalize_callback = finalize_callback
+
+    async def on_submit(self, interaction: Interaction):
+        await self._finalize_callback(interaction, approved=self.approved, reason=self.reason.value.strip() or None)
+
+
 class StatBatchSubmissionReviewView(discord.ui.View):
     """Posted alongside a /stat_submit call in the review channel. A single
     /stat_submit can fill in several stats at once (see stats.py) - this
@@ -159,7 +182,9 @@ class StatBatchSubmissionReviewView(discord.ui.View):
 
     Approving copies every pending row's value into player_stats (making it
     show up on /profile and any leaderboard for that stat_type); rejecting
-    just closes out all the queue rows without touching player_stats.
+    just closes out all the queue rows without touching player_stats. Either
+    button opens a ReviewReasonModal first so staff can attach an optional
+    note, which gets included in the submitter's DM and the edited embed.
 
     timeout=None + a custom_id keyed on the submission ids is what lets this
     survive a bot restart - app.py re-attaches one of these per still-pending
@@ -181,11 +206,7 @@ class StatBatchSubmissionReviewView(discord.ui.View):
         )
         return cursor.fetchall()
 
-    async def _finalize(self, interaction: Interaction, *, approved: bool):
-        if not _is_staff_member(interaction):
-            await interaction.response.send_message("You don't have permission to review submissions.", ephemeral=True)
-            return
-
+    async def _finalize(self, interaction: Interaction, *, approved: bool, reason: Optional[str] = None):
         rows = self._load_submissions()
         if not rows:
             await interaction.response.send_message("This submission no longer exists.", ephemeral=True)
@@ -219,6 +240,8 @@ class StatBatchSubmissionReviewView(discord.ui.View):
             item.disabled = True
 
         verdict_line = f"\n\n{'✅ Approved' if approved else '❌ Rejected'} by {interaction.user.mention}"
+        if reason:
+            verdict_line += f"\n**Reason:** {reason}"
         original_embed = interaction.message.embeds[0]
         original_embed.description = (original_embed.description or "") + verdict_line
         await interaction.response.edit_message(embed=original_embed, view=self)
@@ -230,22 +253,32 @@ class StatBatchSubmissionReviewView(discord.ui.View):
         player_row = cursor.fetchone()
         if player_row:
             stat_lines = "\n".join(f"- **{stat_type}**: {value:,}" for _id, _pid, stat_type, value, _status in pending_rows)
+            dm_message = (
+                f"✅ Your stat submission was approved and is now on your profile:\n{stat_lines}"
+                if approved else
+                f"❌ Your stat submission was rejected:\n{stat_lines}"
+            )
+            if reason:
+                dm_message += f"\n\n**Staff note:** {reason}"
             try:
                 submitter = await interaction.client.fetch_user(player_row[0])
-                if approved:
-                    await submitter.send(f"✅ Your stat submission was approved and is now on your profile:\n{stat_lines}")
-                else:
-                    await submitter.send(f"❌ Your stat submission was rejected:\n{stat_lines}")
+                await submitter.send(dm_message)
             except (discord.Forbidden, discord.NotFound):
                 pass
 
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.green)
     async def approve(self, interaction: Interaction, button: discord.ui.Button):
-        await self._finalize(interaction, approved=True)
+        if not _is_staff_member(interaction):
+            await interaction.response.send_message("You don't have permission to review submissions.", ephemeral=True)
+            return
+        await interaction.response.send_modal(ReviewReasonModal(approved=True, finalize_callback=self._finalize))
 
     @discord.ui.button(label="Reject", style=discord.ButtonStyle.red)
     async def reject(self, interaction: Interaction, button: discord.ui.Button):
-        await self._finalize(interaction, approved=False)
+        if not _is_staff_member(interaction):
+            await interaction.response.send_message("You don't have permission to review submissions.", ephemeral=True)
+            return
+        await interaction.response.send_modal(ReviewReasonModal(approved=False, finalize_callback=self._finalize))
 
 
 class BadgeSubmissionReviewView(discord.ui.View):
@@ -266,11 +299,7 @@ class BadgeSubmissionReviewView(discord.ui.View):
         )
         return cursor.fetchone()
 
-    async def _finalize(self, interaction: Interaction, *, approved: bool):
-        if not _is_staff_member(interaction):
-            await interaction.response.send_message("You don't have permission to review submissions.", ephemeral=True)
-            return
-
+    async def _finalize(self, interaction: Interaction, *, approved: bool, reason: Optional[str] = None):
         submission = await self._load_submission()
         if not submission:
             await interaction.response.send_message("This submission no longer exists.", ephemeral=True)
@@ -300,6 +329,8 @@ class BadgeSubmissionReviewView(discord.ui.View):
             item.disabled = True
 
         verdict_line = f"\n\n{'✅ Approved' if approved else '❌ Rejected'} by {interaction.user.mention}"
+        if reason:
+            verdict_line += f"\n**Reason:** {reason}"
         original_embed = interaction.message.embeds[0]
         original_embed.description = (original_embed.description or "") + verdict_line
         await interaction.response.edit_message(embed=original_embed, view=self)
@@ -308,19 +339,29 @@ class BadgeSubmissionReviewView(discord.ui.View):
         cursor.execute("SELECT discord_id FROM players WHERE id = ?", (player_id,))
         player_row = cursor.fetchone()
         if player_row:
+            dm_message = (
+                f"✅ Your **{badge_name}** badge was approved and is now on your profile."
+                if approved else
+                f"❌ Your **{badge_name}** badge submission was rejected."
+            )
+            if reason:
+                dm_message += f"\n\n**Staff note:** {reason}"
             try:
                 submitter = await interaction.client.fetch_user(player_row[0])
-                if approved:
-                    await submitter.send(f"✅ Your **{badge_name}** badge was approved and is now on your profile.")
-                else:
-                    await submitter.send(f"❌ Your **{badge_name}** badge submission was rejected.")
+                await submitter.send(dm_message)
             except (discord.Forbidden, discord.NotFound):
                 pass
 
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.green)
     async def approve(self, interaction: Interaction, button: discord.ui.Button):
-        await self._finalize(interaction, approved=True)
+        if not _is_staff_member(interaction):
+            await interaction.response.send_message("You don't have permission to review submissions.", ephemeral=True)
+            return
+        await interaction.response.send_modal(ReviewReasonModal(approved=True, finalize_callback=self._finalize))
 
     @discord.ui.button(label="Reject", style=discord.ButtonStyle.red)
     async def reject(self, interaction: Interaction, button: discord.ui.Button):
-        await self._finalize(interaction, approved=False)
+        if not _is_staff_member(interaction):
+            await interaction.response.send_message("You don't have permission to review submissions.", ephemeral=True)
+            return
+        await interaction.response.send_modal(ReviewReasonModal(approved=False, finalize_callback=self._finalize))
