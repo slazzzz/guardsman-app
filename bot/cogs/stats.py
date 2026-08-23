@@ -145,6 +145,11 @@ class StatsCog(commands.Cog):
         proof_3: Optional[discord.Attachment] = None,
         proof_4: Optional[discord.Attachment] = None,
         proof_5: Optional[discord.Attachment] = None,
+        proof_6: Optional[discord.Attachment] = None,
+        proof_7: Optional[discord.Attachment] = None,
+        proof_8: Optional[discord.Attachment] = None,
+        proof_9: Optional[discord.Attachment] = None,
+        proof_10: Optional[discord.Attachment] = None,
     ):
         # Left blank (None) means "not submitting this one" - unlike a 0-means-
         # skip convention, this doesn't break stats where 0 is a real, valid
@@ -184,7 +189,7 @@ class StatsCog(commands.Cog):
             )
             return
 
-        proofs = [a for a in (proof, proof_2, proof_3, proof_4, proof_5) if a is not None]
+        proofs = [a for a in (proof, proof_2, proof_3, proof_4, proof_5, proof_6, proof_7, proof_8, proof_9, proof_10) if a is not None]
         player_id = get_or_create_player_id(interaction.user.id)
         proof_url = "\n".join(a.url for a in proofs)
 
