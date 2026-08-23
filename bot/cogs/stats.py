@@ -130,6 +130,10 @@ class StatsCog(commands.Cog):
         firewall_record=f"{STAT_TYPES['firewall_record'][0]} - leave blank if you're not submitting this one",
         robux_spent=f"{STAT_TYPES['robux_spent'][0]} - leave blank if you're not submitting this one",
         max_modifier_percentage=f"{STAT_TYPES['max_modifier_percentage'][0]} - leave blank if you're not submitting this one",
+        modifier_wins_1star=f"{STAT_TYPES['modifier_wins_1star'][0]} - 1★ runs only - leave blank if you're not submitting this one",
+        modifier_wins_2star=f"{STAT_TYPES['modifier_wins_2star'][0]} - 2★ runs only - leave blank if you're not submitting this one",
+        modifier_wins_3star=f"{STAT_TYPES['modifier_wins_3star'][0]} - 3★ runs only - leave blank if you're not submitting this one",
+        modifier_wins_4star=f"{STAT_TYPES['modifier_wins_4star'][0]} - 4★ runs only - leave blank if you're not submitting this one",
         proof="Screenshot(s) covering whichever stat(s) you filled in above",
     )
     @is_allowed()
@@ -148,10 +152,19 @@ class StatsCog(commands.Cog):
         firewall_record: Optional[int] = None,
         robux_spent: Optional[int] = None,
         max_modifier_percentage: Optional[int] = None,
+        modifier_wins_1star: Optional[int] = None,
+        modifier_wins_2star: Optional[int] = None,
+        modifier_wins_3star: Optional[int] = None,
+        modifier_wins_4star: Optional[int] = None,
         proof_2: Optional[discord.Attachment] = None,
         proof_3: Optional[discord.Attachment] = None,
         proof_4: Optional[discord.Attachment] = None,
         proof_5: Optional[discord.Attachment] = None,
+        proof_6: Optional[discord.Attachment] = None,
+        proof_7: Optional[discord.Attachment] = None,
+        proof_8: Optional[discord.Attachment] = None,
+        proof_9: Optional[discord.Attachment] = None,
+        proof_10: Optional[discord.Attachment] = None,
     ):
         # Left blank (None) means "not submitting this one" - unlike a 0-means-
         # skip convention, this doesn't break stats where 0 is a real, valid
@@ -168,6 +181,10 @@ class StatsCog(commands.Cog):
             "firewall_record": firewall_record,
             "robux_spent": robux_spent,
             "max_modifier_percentage": max_modifier_percentage,
+            "modifier_wins_1star": modifier_wins_1star,
+            "modifier_wins_2star": modifier_wins_2star,
+            "modifier_wins_3star": modifier_wins_3star,
+            "modifier_wins_4star": modifier_wins_4star,
         }
         provided = {stat_type: value for stat_type, value in submitted.items() if value is not None}
 
@@ -191,7 +208,7 @@ class StatsCog(commands.Cog):
             )
             return
 
-        proofs = [a for a in (proof, proof_2, proof_3, proof_4, proof_5) if a is not None]
+        proofs = [a for a in (proof, proof_2, proof_3, proof_4, proof_5, proof_6, proof_7, proof_8, proof_9, proof_10) if a is not None]
         player_id = get_or_create_player_id(interaction.user.id)
         proof_url = "\n".join(a.url for a in proofs)
 

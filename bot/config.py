@@ -89,4 +89,8 @@ STAT_TYPES: dict[str, tuple[str, str]] = {
     "firewall_record": ("Endless Firewall Record", "Door"),
     "robux_spent": ("Robux Spent", "Robux"),
     "max_modifier_percentage": ("Max Modifier Percentage", "%"),
+    "modifier_wins_1star": ("Modified Run Wins (1★)", "Win"),
+    "modifier_wins_2star": ("Modified Run Wins (2★)", "Win"),
+    "modifier_wins_3star": ("Modified Run Wins (3★)", "Win"),
+    "modifier_wins_4star": ("Modified Run Wins (4★)", "Win"),
 }
