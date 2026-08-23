@@ -7,6 +7,12 @@
 #   approve/reject the whole batch at once. Approve/Reject opens a small modal
 #   for an optional reason, which gets DMed to the submitter alongside the verdict.
 # /stat_add -> trusted-admin direct write, bypasses the queue entirely.
+# /stat_bulk_add -> same as /stat_add, but one row per (discord_id, stat_type,
+#   value) from a file - for importing/updating many players' stats at once
+#   instead of one /stat_add per stat per player.
+# /badge_add -> trusted-admin direct write, same as /stat_add.
+# /badge_bulk_add -> same idea as /stat_bulk_add, for badges - one row per
+#   (discord_id, badge_name) from a file.
 # /badge_submit -> auto-awards if the submitter already holds the Discord role
 #   linked to that badge in badge_role_ids; otherwise falls into a
 #   staff-reviewed queue (badge_submissions, also pinging staff_roles) same as
@@ -16,12 +22,15 @@
 #   against badge_role_ids and awards anything that matches but isn't on their
 #   profile yet. Needed because those roles are granted manually and can go
 #   stale between when someone gets the role and when they run /badge_submit.
-# /badge_add, /badge_remove -> trusted-admin direct write, same as /stat_add.
-# /profile -> shows a member's verified stats, badges, and highest
-#   endless-record/win role. Those roles are granted manually by staff via
-#   ticket for specific win/endless thresholds, entirely outside this bot -
-#   nothing here computes, assigns, or revokes them; this only reads whichever
-#   role the member already holds and displays it.
+# /badge_remove -> trusted-admin direct write, same as /stat_add.
+# /profile -> shows the CALLER's own verified stats, badges, and highest
+#   endless-record/win role. Always self - no `user` parameter - so anyone can
+#   run it. /profile_lookup is the staff-only equivalent for checking someone
+#   else's; both render off the same build_profile_embed() so they can't drift.
+#   Those roles are granted manually by staff via ticket for specific win/
+#   endless thresholds, entirely outside this bot - nothing here computes,
+#   assigns, or revokes them; this only reads whichever role the member
+#   already holds and displays it.
 # /leaderboard_stats_setup -> registers a channel + interval for a stat_type
 #   so tasks.py's stat_leaderboard_loop keeps it updated automatically.
 #   use_image=True switches that board to a rendered PNG instead of a text
@@ -33,6 +42,8 @@
 #   actual off switch.
 # /leaderboard_stats_image -> on-demand PNG version of any stat leaderboard.
 
+import csv
+from io import StringIO
 from typing import Optional
 
 import discord
@@ -289,6 +300,82 @@ class StatsCog(commands.Cog):
 
         await interaction.response.send_message(f"Set **{stat_type.name}** to **{value:,}** for {user.mention}.", ephemeral=True)
 
+    @app_commands.command(
+        name="stat_bulk_add",
+        description="Bulk-set player stats from a file (discord_id,stat_type,value per line) - trusted admin, no review needed",
+    )
+    @app_commands.guilds(GUILD_ID)
+    @is_admin()
+    async def stat_bulk_add(self, interaction: Interaction, file: discord.Attachment):
+        if not file.filename.lower().endswith((".csv", ".txt")):
+            await interaction.response.send_message("Please attach a .csv or .txt file.", ephemeral=True)
+            return
+
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        try:
+            text = (await file.read()).decode("utf-8-sig")
+        except Exception as e:
+            await interaction.followup.send(f"Could not read attachment: {e}", ephemeral=True)
+            return
+
+        rows = [row for row in csv.reader(StringIO(text)) if row and any(cell.strip() for cell in row)]
+        if rows and rows[0][0].strip().lower() in ("discord_id", "discord id", "id"):
+            rows = rows[1:]  # optional header row
+
+        if not rows:
+            await interaction.followup.send("File is empty.", ephemeral=True)
+            return
+
+        valid_stat_types = ", ".join(STAT_TYPES.keys())
+        updated = 0
+        errors: list[str] = []
+
+        for line_number, row in enumerate(rows, start=1):
+            if len(row) < 3:
+                errors.append(f"Row {line_number}: expected discord_id,stat_type,value.")
+                continue
+
+            try:
+                discord_id = int(row[0].strip())
+            except ValueError:
+                errors.append(f"Row {line_number}: discord_id must be a number.")
+                continue
+
+            stat_type = row[1].strip()
+            if stat_type not in STAT_TYPES:
+                errors.append(f"Row {line_number}: unknown stat_type '{stat_type}' (valid: {valid_stat_types}).")
+                continue
+
+            try:
+                value = int(row[2].strip())
+            except ValueError:
+                errors.append(f"Row {line_number}: value must be a number.")
+                continue
+
+            if value < 0:
+                errors.append(f"Row {line_number}: value can't be negative.")
+                continue
+
+            player_id = get_or_create_player_id(discord_id)
+            cursor.execute("""
+                INSERT INTO player_stats (player_id, stat_type, value, source, verified_by, updated_at)
+                VALUES (?, ?, ?, 'admin', ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(player_id, stat_type) DO UPDATE SET
+                    value = excluded.value, source = 'admin',
+                    verified_by = excluded.verified_by, updated_at = CURRENT_TIMESTAMP
+            """, (player_id, stat_type, value, interaction.user.id))
+            updated += 1
+
+        conn.commit()
+
+        summary = f"Bulk stat update: {updated} set"
+        summary += " ✅" if not errors else f", {len(errors)} error(s):\n" + "\n".join(errors[:15])
+        if len(errors) > 15:
+            summary += f"\n...and {len(errors) - 15} more."
+
+        await interaction.followup.send(summary[:2000], ephemeral=True)
+
     @app_commands.command(name="badge_add", description="Award a badge to a player's profile (trusted admin)")
     @app_commands.guilds(GUILD_ID)
     @is_admin_or_staff()
@@ -305,6 +392,71 @@ class StatsCog(commands.Cog):
             return
 
         await interaction.response.send_message(f"Awarded **{badge_name}** to {user.mention}.", ephemeral=True)
+
+    @app_commands.command(
+        name="badge_bulk_add",
+        description="Bulk-award badges from a file (discord_id,badge_name per line) - trusted admin",
+    )
+    @app_commands.guilds(GUILD_ID)
+    @is_admin()
+    async def badge_bulk_add(self, interaction: Interaction, file: discord.Attachment):
+        if not file.filename.lower().endswith((".csv", ".txt")):
+            await interaction.response.send_message("Please attach a .csv or .txt file.", ephemeral=True)
+            return
+
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        try:
+            text = (await file.read()).decode("utf-8-sig")
+        except Exception as e:
+            await interaction.followup.send(f"Could not read attachment: {e}", ephemeral=True)
+            return
+
+        rows = [row for row in csv.reader(StringIO(text)) if row and any(cell.strip() for cell in row)]
+        if rows and rows[0][0].strip().lower() in ("discord_id", "discord id", "id"):
+            rows = rows[1:]  # optional header row
+
+        if not rows:
+            await interaction.followup.send("File is empty.", ephemeral=True)
+            return
+
+        awarded = already_had = 0
+        errors: list[str] = []
+
+        for line_number, row in enumerate(rows, start=1):
+            if len(row) < 2:
+                errors.append(f"Row {line_number}: expected discord_id,badge_name.")
+                continue
+
+            try:
+                discord_id = int(row[0].strip())
+            except ValueError:
+                errors.append(f"Row {line_number}: discord_id must be a number.")
+                continue
+
+            badge_name = row[1].strip()
+            if not badge_name:
+                errors.append(f"Row {line_number}: badge_name is required.")
+                continue
+
+            player_id = get_or_create_player_id(discord_id)
+            try:
+                cursor.execute(
+                    "INSERT INTO player_badges (player_id, badge_name, awarded_by, source) VALUES (?, ?, ?, 'manual')",
+                    (player_id, badge_name, interaction.user.id)
+                )
+                awarded += 1
+            except sqlite3.IntegrityError:
+                already_had += 1
+
+        conn.commit()
+
+        summary = f"Bulk badge award: {awarded} awarded, {already_had} already had it"
+        summary += " ✅" if not errors else f", {len(errors)} error(s):\n" + "\n".join(errors[:15])
+        if len(errors) > 15:
+            summary += f"\n...and {len(errors) - 15} more."
+
+        await interaction.followup.send(summary[:2000], ephemeral=True)
 
     @app_commands.command(
         name="badge_submit",
@@ -476,17 +628,15 @@ class StatsCog(commands.Cog):
 
         await interaction.response.send_message(f"Removed **{badge_name}** from {user.mention}.", ephemeral=True)
 
-    @app_commands.command(name="profile", description="Show a division member's Pressure stats card")
-    @app_commands.guilds(GUILD_ID)
-    @is_allowed()
-    async def profile(self, interaction: Interaction, user: Optional[Member] = None):
-        member = user or interaction.user
-
+    async def build_profile_embed(self, member: Member, *, is_self: bool) -> Optional[Embed]:
+        """Builds the profile embed for `member`, or None if they have no
+        player row yet. Shared by /profile (self-only) and /profile_lookup
+        (staff-only, any member) so the two can't drift apart - is_self only
+        changes the footer wording for the no-Roblox-linked case."""
         cursor.execute("SELECT id, roblox_id FROM players WHERE discord_id = ?", (member.id,))
         player = cursor.fetchone()
         if not player:
-            await interaction.response.send_message(f"{member.mention} has no stats on file yet.", ephemeral=True)
-            return
+            return None
         player_id, roblox_id = player
 
         cursor.execute("SELECT stat_type, value FROM player_stats WHERE player_id = ?", (player_id,))
@@ -525,8 +675,32 @@ class StatsCog(commands.Cog):
             avatar_url = get_full_avatar_url(roblox_id)
             if avatar_url:
                 embed.set_image(url=avatar_url)
-        elif member.id == interaction.user.id:
+        elif is_self:
             embed.set_footer(text="No Roblox account linked yet - run /roblox_link to add your avatar here.")
+        else:
+            embed.set_footer(text=f"{member.display_name} hasn't linked a Roblox account yet.")
+
+        return embed
+
+    @app_commands.command(name="profile", description="Show your own Pressure stats card")
+    @app_commands.guilds(GUILD_ID)
+    @is_allowed()
+    async def profile(self, interaction: Interaction):
+        embed = await self.build_profile_embed(interaction.user, is_self=True)
+        if embed is None:
+            await interaction.response.send_message("You have no stats on file yet - `/stat_submit` to add one!", ephemeral=True)
+            return
+
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="profile_lookup", description="Show another division member's Pressure stats card (staff)")
+    @app_commands.guilds(GUILD_ID)
+    @is_admin_or_staff()
+    async def profile_lookup(self, interaction: Interaction, user: Member):
+        embed = await self.build_profile_embed(user, is_self=False)
+        if embed is None:
+            await interaction.response.send_message(f"{user.mention} has no stats on file yet.", ephemeral=True)
+            return
 
         await interaction.response.send_message(embed=embed)
 
