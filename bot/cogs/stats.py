@@ -90,8 +90,15 @@ class StatsCog(commands.Cog):
     @app_commands.describe(
         hadal_wins=f"{STAT_TYPES['hadal_wins'][0]} - leave blank if you're not submitting this one",
         endless_record=f"{STAT_TYPES['endless_record'][0]} - leave blank if you're not submitting this one",
-        modifier_runs=f"{STAT_TYPES['modifier_runs'][0]} - leave blank if you're not submitting this one",
+        modifier_wins=f"{STAT_TYPES['modifier_wins'][0]} - leave blank if you're not submitting this one",
         death_count=f"{STAT_TYPES['death_count'][0]} - leave blank if you're not submitting this one",
+        heartburn_score=f"{STAT_TYPES['heartburn_score'][0]} - leave blank if you're not submitting this one",
+        heartburn_wins=f"{STAT_TYPES['heartburn_wins'][0]} - leave blank if you're not submitting this one",
+        raveyard_wins=f"{STAT_TYPES['raveyard_wins'][0]} - leave blank if you're not submitting this one",
+        hunted_wins=f"{STAT_TYPES['hunted_wins'][0]} - leave blank if you're not submitting this one",
+        firewall_record=f"{STAT_TYPES['firewall_record'][0]} - leave blank if you're not submitting this one",
+        robux_spent=f"{STAT_TYPES['robux_spent'][0]} - leave blank if you're not submitting this one",
+        max_modifier_percentage=f"{STAT_TYPES['max_modifier_percentage'][0]} - leave blank if you're not submitting this one",
         proof="Screenshot(s) covering whichever stat(s) you filled in above",
     )
     async def stat_submit(
