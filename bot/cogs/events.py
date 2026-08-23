@@ -25,8 +25,7 @@ class EventsCog(commands.Cog):
         mode=[app_commands.Choice(name=mode_name, value=mode_name.lower()) for mode_name in EVENT_MODES],
         type=[app_commands.Choice(name=type_name, value=type_name.lower()) for type_name in EVENT_TYPES]
     )
-    @is_admin()
-    @is_staff()
+    @is_admin_or_staff()
     async def event_add(self, interaction: Interaction, name: str, mode: str, type: str, prize_pool: int = 0, ignore_weekly_condition: bool = False):
         if prize_pool < 0:
             await interaction.response.send_message("prize_pool must be greater than 0.", ephemeral=True)
@@ -103,8 +102,7 @@ class EventsCog(commands.Cog):
         description="Get a list of all hosted events.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_admin()
-    @is_allowed()
+    @is_admin_or_staff()
     async def event_list(self, interaction: Interaction):
         cursor.execute("SELECT * FROM events")
         events = cursor.fetchall()
@@ -228,8 +226,7 @@ class EventsCog(commands.Cog):
         description="Display a leaderboard compiling the result of an event.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_admin()
-    @is_staff()
+    @is_admin_or_staff()
     async def event_leaderboard(self, interaction: Interaction, event_number: int = 0, display_in_channel: bool = False, generate_image: bool = False):
         event = await require_event(interaction, event_number)
         if event is None:
@@ -293,8 +290,7 @@ class EventsCog(commands.Cog):
     @app_commands.choices(
         field=[app_commands.Choice(name=field_name, value=field_name) for field_name in ["event_name", "event_mode", "event_type", "event_prize"]]
     )
-    @is_admin()
-    @is_staff()
+    @is_admin_or_staff()
     async def event_update(self, interaction: Interaction, field: str, value: str, event_number: int = 0):
         event = await require_event(interaction, event_number)
         if event is None:
@@ -321,8 +317,7 @@ class EventsCog(commands.Cog):
         description="Open a form of an event in the forms channel.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_admin()
-    @is_staff()
+    @is_admin_or_staff()
     async def event_form(self, interaction: Interaction, event_number: int = 0):
         event = await require_event(interaction, event_number)
         if event is None:
@@ -351,8 +346,7 @@ class EventsCog(commands.Cog):
         description="Set when an event starts so registered players get a reminder DM ~1 hour before.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_admin()
-    @is_staff()
+    @is_admin_or_staff()
     async def event_set_start_time(self, interaction: Interaction, day: int, month: int, hour: int, minute: int, event_number: int = 0):
         event = await require_event(interaction, event_number)
         if event is None:
