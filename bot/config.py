@@ -79,7 +79,14 @@ BADGE_ROLE_IDS: dict[int, int] = {int(k): v for k, v in stats_data.get("badge_ro
 # key -> (display label, unit label used in leaderboard rows)
 STAT_TYPES: dict[str, tuple[str, str]] = {
     "hadal_wins": ("Hadal Blacksite Wins", "Win"),
-    "endless_record": ("Endless Record (doors)", "Door"),
-    "modifier_runs": ("Modifier Run Clears", "Clear"),
+    "endless_record": ("Endless Record", "Door"),
+    "modifier_wins": ("Modified Run Wins", "Win"),
     "death_count": ("Deaths", "Death"),
+    "heartburn_score": ("Heartburn Score", "Point"),
+    "heartburn_wins": ("Heartburn Wins", "Win"),
+    "raveyard_wins": ("Raveyard Wins", "Win"),
+    "hunted_wins": ("Hunted Wins", "Win"),
+    "firewall_record": ("Endless Firewall Record", "Door"),
+    "robux_spent": ("Robux Spent", "Robux"),
+    "max_modifier_percentage": ("Max Modifier Percentage", "%"),
 }

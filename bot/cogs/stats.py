@@ -100,10 +100,19 @@ class StatsCog(commands.Cog):
         proof: discord.Attachment,
         hadal_wins: Optional[int] = None,
         endless_record: Optional[int] = None,
-        modifier_runs: Optional[int] = None,
         death_count: Optional[int] = None,
+        modifier_wins: Optional[int] = None,
+        heartburn_score: Optional[int] = None,
+        heartburn_wins: Optional[int] = None,
+        raveyard_wins: Optional[int] = None,
+        hunted_wins: Optional[int] = None,
+        firewall_record: Optional[int] = None,
+        robux_spent: Optional[int] = None,
+        max_modifier_percentage: Optional[int] = None,
         proof_2: Optional[discord.Attachment] = None,
         proof_3: Optional[discord.Attachment] = None,
+        proof_4: Optional[discord.Attachment] = None,
+        proof_5: Optional[discord.Attachment] = None,
     ):
         # Left blank (None) means "not submitting this one" - unlike a 0-means-
         # skip convention, this doesn't break stats where 0 is a real, valid
@@ -111,8 +120,15 @@ class StatsCog(commands.Cog):
         submitted = {
             "hadal_wins": hadal_wins,
             "endless_record": endless_record,
-            "modifier_runs": modifier_runs,
             "death_count": death_count,
+            "modifier_wins": modifier_wins,
+            "heartburn_score": heartburn_score,
+            "heartburn_wins": heartburn_wins,
+            "raveyard_wins": raveyard_wins,
+            "hunted_wins": hunted_wins,
+            "firewall_record": firewall_record,
+            "robux_spent": robux_spent,
+            "max_modifier_percentage": max_modifier_percentage,
         }
         provided = {stat_type: value for stat_type, value in submitted.items() if value is not None}
 
@@ -136,7 +152,7 @@ class StatsCog(commands.Cog):
             )
             return
 
-        proofs = [a for a in (proof, proof_2, proof_3) if a is not None]
+        proofs = [a for a in (proof, proof_2, proof_3, proof_4, proof_5) if a is not None]
         player_id = get_or_create_player_id(interaction.user.id)
         proof_url = "\n".join(a.url for a in proofs)
 
@@ -384,6 +400,7 @@ class StatsCog(commands.Cog):
 
     @app_commands.command(name="profile", description="Show a division member's Pressure stats card")
     @app_commands.guilds(GUILD_ID)
+    @is_allowed()
     async def profile(self, interaction: Interaction, user: Optional[Member] = None):
         member = user or interaction.user
 

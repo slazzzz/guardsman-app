@@ -26,11 +26,12 @@ def capitalize(s: str) -> str:
 
 
 PLACEMENT_EMOJIS = {0: "🥇", 1: "🥈", 2: "🥉"}
+UNIT_EXCLUDE = ["Robux", "%"]
 
 
 def placement_line(i: int, user_id: int, score: int, label: str = "Point") -> str:
     """Formats a single leaderboard row with medal emoji / ordinal placement."""
-    suffix = "s" if score != 1 else ""
+    suffix = "s" if score != 1 and label not in UNIT_EXCLUDE else ""
     if i in PLACEMENT_EMOJIS:
         place_word = {0: "1st", 1: "2nd", 2: "3rd"}[i]
         return f"{PLACEMENT_EMOJIS[i]} **{place_word} place** - <@{user_id}> - {score} {label}{suffix}\n"
@@ -39,7 +40,7 @@ def placement_line(i: int, user_id: int, score: int, label: str = "Point") -> st
 
 def team_placement_line(i: int, team_name: str, score: int, label: str = "Point") -> str:
     """Same as placement_line, but for a team name instead of a Discord mention."""
-    suffix = "s" if score != 1 else ""
+    suffix = "s" if score != 1 and label not in UNIT_EXCLUDE else ""
     if i in PLACEMENT_EMOJIS:
         place_word = {0: "1st", 1: "2nd", 2: "3rd"}[i]
         return f"{PLACEMENT_EMOJIS[i]} **{place_word} place** - {team_name} - {score} {label}{suffix}\n"
