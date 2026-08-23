@@ -151,58 +151,67 @@ class PaginatorView(discord.ui.View):
         await interaction.response.edit_message(embed=self.embeds[self.index], view=self)
 
 
-class StatSubmissionReviewView(discord.ui.View):
-    """Posted alongside a stat submission in the review channel. Approving copies
-    the submitted value into player_stats (making it show up on /profile and any
-    leaderboard for that stat_type); rejecting just closes out the queue row.
+class StatBatchSubmissionReviewView(discord.ui.View):
+    """Posted alongside a /stat_submit call in the review channel. A single
+    /stat_submit can fill in several stats at once (see stats.py) - this
+    reviews all of them together with one Approve/Reject press instead of
+    forcing staff to click through each stat_submissions row individually.
 
-    timeout=None + a custom_id keyed on the submission's row id is what lets this
+    Approving copies every pending row's value into player_stats (making it
+    show up on /profile and any leaderboard for that stat_type); rejecting
+    just closes out all the queue rows without touching player_stats.
+
+    timeout=None + a custom_id keyed on the submission ids is what lets this
     survive a bot restart - app.py re-attaches one of these per still-pending
-    submission on_ready, the same way JoinEventView does for its event id.
+    batch on_ready, the same way JoinEventView does for its event id.
     """
 
-    def __init__(self, submission_id: int):
+    def __init__(self, submission_ids: list[int]):
         super().__init__(timeout=None)
-        self.submission_id = submission_id
-        self.approve.custom_id = f"stat_submission_approve_{submission_id}"
-        self.reject.custom_id = f"stat_submission_reject_{submission_id}"
+        self.submission_ids = submission_ids
+        ids_key = "-".join(str(i) for i in submission_ids)
+        self.approve.custom_id = f"stat_batch_approve_{ids_key}"
+        self.reject.custom_id = f"stat_batch_reject_{ids_key}"
 
-    async def _load_submission(self):
+    def _load_submissions(self):
+        placeholders = ",".join("?" * len(self.submission_ids))
         cursor.execute(
-            "SELECT player_id, stat_type, value, status FROM stat_submissions WHERE id = ?",
-            (self.submission_id,)
+            f"SELECT id, player_id, stat_type, value, status FROM stat_submissions WHERE id IN ({placeholders})",
+            self.submission_ids
         )
-        return cursor.fetchone()
+        return cursor.fetchall()
 
     async def _finalize(self, interaction: Interaction, *, approved: bool):
         if not _is_staff_member(interaction):
             await interaction.response.send_message("You don't have permission to review submissions.", ephemeral=True)
             return
 
-        submission = await self._load_submission()
-        if not submission:
+        rows = self._load_submissions()
+        if not rows:
             await interaction.response.send_message("This submission no longer exists.", ephemeral=True)
             return
 
-        player_id, stat_type, value, status = submission
-        if status != "pending":
-            await interaction.response.send_message(f"This submission was already {status}.", ephemeral=True)
+        pending_rows = [row for row in rows if row[4] == "pending"]
+        if not pending_rows:
+            await interaction.response.send_message(f"This submission was already {rows[0][4]}.", ephemeral=True)
             return
 
         new_status = "approved" if approved else "rejected"
-        cursor.execute(
-            "UPDATE stat_submissions SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (new_status, interaction.user.id, self.submission_id)
-        )
+        player_id = pending_rows[0][1]
 
-        if approved:
-            cursor.execute("""
-                INSERT INTO player_stats (player_id, stat_type, value, source, verified_by, updated_at)
-                VALUES (?, ?, ?, 'manual', ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(player_id, stat_type) DO UPDATE SET
-                    value = excluded.value, source = 'manual',
-                    verified_by = excluded.verified_by, updated_at = CURRENT_TIMESTAMP
-            """, (player_id, stat_type, value, interaction.user.id))
+        for submission_id, _player_id, stat_type, value, _status in pending_rows:
+            cursor.execute(
+                "UPDATE stat_submissions SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (new_status, interaction.user.id, submission_id)
+            )
+            if approved:
+                cursor.execute("""
+                    INSERT INTO player_stats (player_id, stat_type, value, source, verified_by, updated_at)
+                    VALUES (?, ?, ?, 'manual', ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(player_id, stat_type) DO UPDATE SET
+                        value = excluded.value, source = 'manual',
+                        verified_by = excluded.verified_by, updated_at = CURRENT_TIMESTAMP
+                """, (player_id, stat_type, value, interaction.user.id))
 
         conn.commit()
 
@@ -220,12 +229,13 @@ class StatSubmissionReviewView(discord.ui.View):
         cursor.execute("SELECT discord_id FROM players WHERE id = ?", (player_id,))
         player_row = cursor.fetchone()
         if player_row:
+            stat_lines = "\n".join(f"- **{stat_type}**: {value:,}" for _id, _pid, stat_type, value, _status in pending_rows)
             try:
                 submitter = await interaction.client.fetch_user(player_row[0])
                 if approved:
-                    await submitter.send(f"✅ Your **{stat_type}** submission ({value:,}) was approved and is now on your profile.")
+                    await submitter.send(f"✅ Your stat submission was approved and is now on your profile:\n{stat_lines}")
                 else:
-                    await submitter.send(f"❌ Your **{stat_type}** submission ({value:,}) was rejected.")
+                    await submitter.send(f"❌ Your stat submission was rejected:\n{stat_lines}")
             except (discord.Forbidden, discord.NotFound):
                 pass
 
@@ -239,9 +249,9 @@ class StatSubmissionReviewView(discord.ui.View):
 
 
 class BadgeSubmissionReviewView(discord.ui.View):
-    """Same shape as StatSubmissionReviewView, for badges roblox_owns_badge()
-    couldn't confirm automatically (private inventory, or the scan didn't reach
-    it) - staff approve/reject from the submitted screenshot(s) instead."""
+    """Same shape as StatBatchSubmissionReviewView, for /badge_submit calls that
+    couldn't auto-award via a linked role (BADGE_ROLE_IDS) - staff approve/reject
+    from the submitted screenshot(s) instead."""
 
     def __init__(self, submission_id: int):
         super().__init__(timeout=None)

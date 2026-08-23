@@ -61,7 +61,12 @@ LEADERBOARD_CARD_FILL = (255, 255, 255, 14)
 LEADERBOARD_CARD_TOP3_ALPHA = 34
 
 
-def leaderboard_image(player_results: list[tuple], display_names: dict[int, str], title: str = "Leaderboard") -> discord.File:
+def leaderboard_image(
+    player_results: list[tuple],
+    display_names: dict[int, str],
+    title: str = "Leaderboard",
+    unit: str = "pt",
+) -> discord.File:
     """Renders a leaderboard PNG entirely in memory (no shared file on disk, so concurrent
     calls can't clobber each other) and returns it as a ready-to-send discord.File.
 
@@ -177,8 +182,9 @@ def leaderboard_image(player_results: list[tuple], display_names: dict[int, str]
             display_text, font=font_name, fill=(255, 255, 255, 255)
         )
 
-        # Score, right-aligned
-        score_text = f"{score:,} pts"
+        # Score, right-aligned. unit is singular (e.g. "Win") and gets
+        # pluralized the same way placement_line() does for the embed version.
+        score_text = f"{score:,} {unit}{'s' if score != 1 else ''}"
         score_bbox = text_draw.textbbox((0, 0), score_text, font=font_score)
         score_w = score_bbox[2] - score_bbox[0]
         text_draw.text(
@@ -303,7 +309,7 @@ async def build_stat_leaderboard_image(guild: Optional[discord.Guild], stat_type
     if stat_type not in STAT_TYPES:
         return None
 
-    label, _unit = STAT_TYPES[stat_type]
+    label, unit = STAT_TYPES[stat_type]
     rows = get_stat_leaderboard_rows(stat_type)
     names = await resolve_display_names_for_guild(guild, [row[0] for row in rows])
-    return leaderboard_image(rows, names, title=label)
+    return leaderboard_image(rows, names, title=label, unit=unit)

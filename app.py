@@ -12,7 +12,7 @@ from bot.client import bot, handler, token, tree
 from bot.config import GUILD, GUILD_ID, MEMBER_ROLES, bot_data
 from bot.database import conn, cursor
 from bot.tasks import reminder_loop, stat_leaderboard_loop
-from bot.ui import BadgeSubmissionReviewView, JoinEventView, StatSubmissionReviewView
+from bot.ui import BadgeSubmissionReviewView, JoinEventView, StatBatchSubmissionReviewView
 
 COGS = (
     "bot.cogs.events",
@@ -79,17 +79,25 @@ async def on_ready():
     # reason as the Join Event view above - button callbacks don't survive a
     # restart unless the view (with its matching custom_id) is re-attached.
     if not getattr(bot, "_stat_review_views_restored", False):
-        cursor.execute("SELECT id FROM stat_submissions WHERE status = 'pending'")
-        pending_stat_ids = [row[0] for row in cursor.fetchall()]
-        for submission_id in pending_stat_ids:
-            bot.add_view(StatSubmissionReviewView(submission_id))
+        # COALESCE(batch_id, id) so pre-batch rows (batch_id NULL, from before
+        # this column existed) each restore as their own single-item batch
+        # instead of all getting lumped into one NULL group.
+        cursor.execute("""
+            SELECT COALESCE(batch_id, id), GROUP_CONCAT(id)
+            FROM stat_submissions
+            WHERE status = 'pending'
+            GROUP BY COALESCE(batch_id, id)
+        """)
+        stat_batches = [[int(x) for x in ids_csv.split(",")] for _batch_id, ids_csv in cursor.fetchall()]
+        for submission_ids in stat_batches:
+            bot.add_view(StatBatchSubmissionReviewView(submission_ids))
 
         cursor.execute("SELECT id FROM badge_submissions WHERE status = 'pending'")
         pending_badge_ids = [row[0] for row in cursor.fetchall()]
         for submission_id in pending_badge_ids:
             bot.add_view(BadgeSubmissionReviewView(submission_id))
 
-        restored_count = len(pending_stat_ids) + len(pending_badge_ids)
+        restored_count = len(stat_batches) + len(pending_badge_ids)
         if restored_count:
             print(f"Restored {restored_count} pending submission review view(s) ✅")
         bot._stat_review_views_restored = True

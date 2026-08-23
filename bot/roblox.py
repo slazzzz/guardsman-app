@@ -39,6 +39,11 @@ def roblox_owns_badge(roblox_id: int, badge_id: int) -> bool:
     """Best-effort check of whether roblox_id owns badge_id, via Roblox's public
     badges.roblox.com list endpoint.
 
+    NOTE: no longer called by /badge_submit (badge role links + a staff-reviewed
+    screenshot queue replaced it - see stats.py/config.py's BADGE_ROLE_IDS) since
+    this could only ever return a reliable True in the first place. Left here in
+    case a future feature wants a best-effort ownership probe again.
+
     IMPORTANT: this can only return a reliable True. Roblox has repeatedly changed
     whether/how badge visibility respects the "who can see my inventory" privacy
     setting, so a private inventory or a badge outside the scanned page window will

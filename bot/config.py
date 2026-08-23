@@ -55,18 +55,26 @@ FORM_CHANNEL_ID: int = form_data.get("form_channel_id")
 #   "stats_data": {
 #       "stats_review_channel_id": 123456789012345678,
 #       "endless_record_role_ids": [111, 222, 333],
-#       "win_role_ids": [444, 555, 666, 777, 888]
+#       "win_role_ids": [444, 555, 666, 777, 888],
+#       "badge_role_ids": {"2124583458": 999888777}
 #   }
 # endless_record_role_ids / win_role_ids should be ordered lowest -> highest
 # tier, matching the division's 3 Endless Record roles and 5 Win roles that
 # are granted manually via ticket outside the bot - /profile shows whichever
 # is the member's highest held role in each list, it doesn't grant them.
+#
+# badge_role_ids maps a Roblox badge id (as a string key, since JSON object
+# keys can't be numbers) to the Discord role that's supposed to mean "has this
+# badge". /badge_submit auto-awards when the submitter already holds the
+# linked role; those roles are granted manually by staff and can drift out of
+# date, so /badge_role_sync lets staff force a re-check for one member.
 
 stats_data = bot_data.get("stats_data", {})
 
 STATS_REVIEW_CHANNEL_ID: int = stats_data.get("stats_review_channel_id")
 ENDLESS_RECORD_ROLE_IDS: list[int] = stats_data.get("endless_record_role_ids", [])
 WIN_ROLE_IDS: list[int] = stats_data.get("win_role_ids", [])
+BADGE_ROLE_IDS: dict[int, int] = {int(k): v for k, v in stats_data.get("badge_role_ids", {}).items()}
 
 # key -> (display label, unit label used in leaderboard rows)
 STAT_TYPES: dict[str, tuple[str, str]] = {

@@ -1,10 +1,18 @@
 ### PLAYER STATS SHOWCASE ###
-# /stat_submit -> queued in stat_submissions, posted to STATS_REVIEW_CHANNEL_ID
-#   with a StatSubmissionReviewView for staff to approve/reject.
+# /stat_submit -> fill in whichever stats you have proof for in one go (leave
+#   the rest blank - don't put 0, that's a real value for stats like deaths).
+#   Queued as one row per filled-in stat in stat_submissions, all sharing a
+#   batch_id, posted to STATS_REVIEW_CHANNEL_ID as a single message with a
+#   StatBatchSubmissionReviewView so staff approve/reject the whole batch at once.
 # /stat_add -> trusted-admin direct write, bypasses the queue entirely.
-# /badge_submit -> tries to auto-verify via Roblox's public badges API first;
-#   only falls into a staff-reviewed queue (badge_submissions) when that can't
-#   confirm ownership (private inventory, or the scan just didn't reach it).
+# /badge_submit -> auto-awards if the submitter already holds the Discord role
+#   linked to that badge in badge_role_ids; otherwise falls into a
+#   staff-reviewed queue (badge_submissions) same as before, just without the
+#   Roblox website ownership check (too unreliable - see roblox.py history).
+# /badge_role_sync -> staff-run: re-checks one member's currently-held roles
+#   against badge_role_ids and awards anything that matches but isn't on their
+#   profile yet. Needed because those roles are granted manually and can go
+#   stale between when someone gets the role and when they run /badge_submit.
 # /badge_add, /badge_remove -> trusted-admin direct write, same as /stat_add.
 # /profile -> shows a member's verified stats, badges, and highest
 #   endless-record/win role. Those roles are granted manually by staff via
@@ -74,20 +82,51 @@ class StatsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="stat_submit", description="Submit a stat for staff to verify (needs proof)")
+    @app_commands.command(
+        name="stat_submit",
+        description="Submit one or more stats for staff to verify (needs proof)"
+    )
     @app_commands.guilds(GUILD_ID)
-    @app_commands.choices(stat_type=STAT_CHOICES)
+    @app_commands.describe(
+        hadal_wins=f"{STAT_TYPES['hadal_wins'][0]} - leave blank if you're not submitting this one",
+        endless_record=f"{STAT_TYPES['endless_record'][0]} - leave blank if you're not submitting this one",
+        modifier_runs=f"{STAT_TYPES['modifier_runs'][0]} - leave blank if you're not submitting this one",
+        death_count=f"{STAT_TYPES['death_count'][0]} - leave blank if you're not submitting this one",
+        proof="Screenshot(s) covering whichever stat(s) you filled in above",
+    )
     async def stat_submit(
         self,
         interaction: Interaction,
-        stat_type: app_commands.Choice[str],
-        value: int,
         proof: discord.Attachment,
+        hadal_wins: Optional[int] = None,
+        endless_record: Optional[int] = None,
+        modifier_runs: Optional[int] = None,
+        death_count: Optional[int] = None,
         proof_2: Optional[discord.Attachment] = None,
         proof_3: Optional[discord.Attachment] = None,
     ):
-        if value < 0:
-            await interaction.response.send_message("Value can't be negative.", ephemeral=True)
+        # Left blank (None) means "not submitting this one" - unlike a 0-means-
+        # skip convention, this doesn't break stats where 0 is a real, valid
+        # value to submit (e.g. a flawless death_count run).
+        submitted = {
+            "hadal_wins": hadal_wins,
+            "endless_record": endless_record,
+            "modifier_runs": modifier_runs,
+            "death_count": death_count,
+        }
+        provided = {stat_type: value for stat_type, value in submitted.items() if value is not None}
+
+        if not provided:
+            await interaction.response.send_message(
+                "Fill in at least one stat to submit.", ephemeral=True
+            )
+            return
+
+        negative = [stat_type for stat_type, value in provided.items() if value < 0]
+        if negative:
+            await interaction.response.send_message(
+                f"{', '.join(STAT_TYPES[s][0] for s in negative)} can't be negative.", ephemeral=True
+            )
             return
 
         if not STATS_REVIEW_CHANNEL_ID:
@@ -99,33 +138,47 @@ class StatsCog(commands.Cog):
 
         proofs = [a for a in (proof, proof_2, proof_3) if a is not None]
         player_id = get_or_create_player_id(interaction.user.id)
+        proof_url = "\n".join(a.url for a in proofs)
 
         try:
+            submission_ids = []
+            for stat_type, value in provided.items():
+                cursor.execute(
+                    "INSERT INTO stat_submissions (player_id, stat_type, value, proof_url) VALUES (?, ?, ?, ?)",
+                    (player_id, stat_type, value, proof_url)
+                )
+                submission_ids.append(cursor.lastrowid)
+
+            # Tag every row from this call with the same batch_id (the first
+            # row's id) so they're reviewed together and so app.py can
+            # re-group them into one view after a restart.
+            batch_id = min(submission_ids)
+            placeholders = ",".join("?" * len(submission_ids))
             cursor.execute(
-                "INSERT INTO stat_submissions (player_id, stat_type, value, proof_url) VALUES (?, ?, ?, ?)",
-                (player_id, stat_type.value, value, "\n".join(a.url for a in proofs))
+                f"UPDATE stat_submissions SET batch_id = ? WHERE id IN ({placeholders})",
+                (batch_id, *submission_ids)
             )
             conn.commit()
-            submission_id = cursor.lastrowid
         except sqlite3.Error as e:
             await interaction.response.send_message(f"Could not record submission: {e}", ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True)
 
+        stat_lines = "\n".join(f"**{STAT_TYPES[s][0]}:** {v:,}" for s, v in provided.items())
         review_embed = Embed(
-            title=f"New stat submission - {stat_type.name}",
-            description=f"**Player:** {interaction.user.mention}\n**Value:** {value:,}",
+            title="New stat submission",
+            description=f"**Player:** {interaction.user.mention}\n{stat_lines}",
             color=discord.Color.blurple(),
         )
-        review_embed.set_footer(text=f"Submission #{submission_id} - {len(proofs)} proof file(s) attached below")
+        review_embed.set_footer(text=f"Batch #{batch_id} - {len(proofs)} proof file(s) attached below")
 
         try:
             review_channel = self.bot.get_channel(STATS_REVIEW_CHANNEL_ID) or await self.bot.fetch_channel(STATS_REVIEW_CHANNEL_ID)
             files = await attachments_to_files(proofs)
-            await review_channel.send(embed=review_embed, files=files, view=StatSubmissionReviewView(submission_id))
+            await review_channel.send(embed=review_embed, files=files, view=StatBatchSubmissionReviewView(submission_ids))
         except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
-            print(f"Could not post submission #{submission_id} for review: {e}")
+            print(f"Could not post submission batch #{batch_id} for review: {e}")
             await interaction.followup.send(
                 "Submission saved, but I couldn't post it to the review channel - let staff know.",
                 ephemeral=True
@@ -172,7 +225,10 @@ class StatsCog(commands.Cog):
 
         await interaction.response.send_message(f"Awarded **{badge_name}** to {user.mention}.", ephemeral=True)
 
-    @app_commands.command(name="badge_submit", description="Claim a Roblox badge for your profile (proof needed only if it can't auto-verify)")
+    @app_commands.command(
+        name="badge_submit",
+        description="Claim a Roblox badge for your profile (auto-awarded if you hold the linked role)"
+    )
     @app_commands.guilds(GUILD_ID)
     async def badge_submit(
         self,
@@ -189,15 +245,16 @@ class StatsCog(commands.Cog):
             await interaction.followup.send(f"Couldn't find a Roblox badge with id `{badge_id}`.", ephemeral=True)
             return
 
-        cursor.execute("SELECT id, roblox_id FROM players WHERE discord_id = ?", (interaction.user.id,))
-        player = cursor.fetchone()
-        player_id = player[0] if player else get_or_create_player_id(interaction.user.id)
-        roblox_id = player[1] if player else 0
+        player_id = get_or_create_player_id(interaction.user.id)
 
-        if roblox_id and roblox_owns_badge(roblox_id, badge_id):
+        # Role-based check first: if this badge is mapped to a Discord role
+        # and the submitter already holds it, award immediately - no proof,
+        # no queue. member.roles works here since this command is guild-only.
+        linked_role_id = BADGE_ROLE_IDS.get(badge_id)
+        if linked_role_id and any(role.id == linked_role_id for role in interaction.user.roles):
             try:
                 cursor.execute(
-                    "INSERT INTO player_badges (player_id, badge_name, awarded_by, source) VALUES (?, ?, ?, 'auto')",
+                    "INSERT INTO player_badges (player_id, badge_name, awarded_by, source) VALUES (?, ?, ?, 'role')",
                     (player_id, badge_name, interaction.user.id)
                 )
                 conn.commit()
@@ -205,17 +262,22 @@ class StatsCog(commands.Cog):
                 await interaction.followup.send(f"You already have **{badge_name}** on your profile.", ephemeral=True)
                 return
 
-            await interaction.followup.send(f"✅ Verified via Roblox - **{badge_name}** is now on your profile.", ephemeral=True)
+            await interaction.followup.send(f"✅ Verified via your linked role - **{badge_name}** is now on your profile.", ephemeral=True)
             return
 
-        # Couldn't confirm automatically - either the account's inventory is
-        # private, or the badge just wasn't in the scanned page window. Either
-        # way, this is NOT proof they don't have it, so fall back to a
-        # screenshot-reviewed queue instead of rejecting outright.
+        # No role match (either nothing's mapped for this badge, or the
+        # submitter doesn't currently hold it) - fall back to a
+        # screenshot-reviewed queue instead of rejecting outright, since the
+        # role could just be stale (see /badge_role_sync).
         proofs = [a for a in (proof, proof_2, proof_3) if a is not None]
         if not proofs:
+            reason = (
+                "you don't currently hold the linked role - ask staff to run `/badge_role_sync` if that's out of date"
+                if linked_role_id else
+                "no role is linked to this badge"
+            )
             await interaction.followup.send(
-                f"Couldn't auto-verify **{badge_name}** (private inventory, most likely) - "
+                f"Couldn't auto-verify **{badge_name}** ({reason}) - "
                 "attach at least one screenshot as proof and run this again.",
                 ephemeral=True
             )
@@ -237,7 +299,7 @@ class StatsCog(commands.Cog):
 
         review_embed = Embed(
             title=f"New badge submission - {badge_name}",
-            description=f"**Player:** {interaction.user.mention}\n**Badge ID:** {badge_id}\n(auto-verify inconclusive - private inventory or unscanned page)",
+            description=f"**Player:** {interaction.user.mention}\n**Badge ID:** {badge_id}",
             color=discord.Color.blurple(),
         )
         review_embed.set_footer(text=f"Submission #{submission_id} - {len(proofs)} proof file(s) attached below")
@@ -255,6 +317,53 @@ class StatsCog(commands.Cog):
             return
 
         await interaction.followup.send("Submitted for staff review ✅ - you'll get a DM once they decide.", ephemeral=True)
+
+    @app_commands.command(
+        name="badge_role_sync",
+        description="Re-check a member's badge roles and award any matching badges (staff)"
+    )
+    @app_commands.guilds(GUILD_ID)
+    @is_allowed()
+    async def badge_role_sync(self, interaction: Interaction, user: Member):
+        if not BADGE_ROLE_IDS:
+            await interaction.response.send_message(
+                "No badge_role_ids configured - add one to stats_data in bot_data.json first.",
+                ephemeral=True
+            )
+            return
+
+        player_id = get_or_create_player_id(user.id)
+        held_role_ids = {role.id for role in user.roles}
+
+        awarded, already_had = [], []
+        for badge_id, role_id in BADGE_ROLE_IDS.items():
+            if role_id not in held_role_ids:
+                continue
+
+            badge_name = get_badge_name(badge_id) or f"Badge {badge_id}"
+            try:
+                cursor.execute(
+                    "INSERT INTO player_badges (player_id, badge_name, awarded_by, source) VALUES (?, ?, ?, 'role')",
+                    (player_id, badge_name, interaction.user.id)
+                )
+                conn.commit()
+                awarded.append(badge_name)
+            except sqlite3.IntegrityError:
+                already_had.append(badge_name)
+
+        if not awarded and not already_had:
+            await interaction.response.send_message(
+                f"{user.mention} doesn't hold any role linked to a badge - nothing to sync.",
+                ephemeral=True
+            )
+            return
+
+        lines = []
+        if awarded:
+            lines.append(f"Awarded: {', '.join(awarded)}")
+        if already_had:
+            lines.append(f"Already had: {', '.join(already_had)}")
+        await interaction.response.send_message(f"Synced badge roles for {user.mention}.\n" + "\n".join(lines), ephemeral=True)
 
     @app_commands.command(name="badge_remove", description="Remove a badge from a player's profile (trusted admin)")
     @app_commands.guilds(GUILD_ID)

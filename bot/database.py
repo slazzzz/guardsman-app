@@ -183,7 +183,12 @@ ensure_column("events", "team_leaderboard_message_id", "INTEGER")
 ensure_column("events", "team_leaderboard_channel_id", "INTEGER")
 ensure_column("results", "team_id", "INTEGER")
 ensure_column("events", "season_id", "INTEGER")
-ensure_column("player_badges", "source", "TEXT DEFAULT 'manual'")  # 'manual' (admin), 'auto' (Roblox API confirmed), 'submitted' (staff-approved)
+ensure_column("player_badges", "source", "TEXT DEFAULT 'manual'")  # 'manual' (admin), 'role' (badge_role_ids match, via /badge_submit or /badge_role_sync), 'submitted' (staff-approved from the screenshot queue)
+# Groups the rows a single /stat_submit call created (one row per stat filled
+# in) so staff can approve/reject them together with one button press instead
+# of once per stat. NULL for rows submitted before this existed - those are
+# treated as their own single-row batch (see app.py's restore query).
+ensure_column("stat_submissions", "batch_id", "INTEGER")
 
 
 def get_active_season_id() -> int:
