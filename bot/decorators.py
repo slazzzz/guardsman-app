@@ -39,8 +39,11 @@ def is_allowed():
         if interaction.user.id in ADMIN_USERS:
             return True
 
-        # Check roles
-        if any(role.id in STAFF_ROLES for role in interaction.user.roles):
+        # Check roles (staff OR regular division member)
+        user_roles = [role.id for role in interaction.user.roles]
+        if any(r in STAFF_ROLES for r in user_roles):
+            return True
+        if any(r in MEMBER_ROLES for r in user_roles):
             return True
 
         # Check permissions
