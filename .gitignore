@@ -7,5 +7,6 @@ misc/
 player_results/
 team_assign/
 team_add/
+venv/
 review.txt
 bot_data.json
