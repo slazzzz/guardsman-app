@@ -11,14 +11,15 @@ from discord import Interaction, app_commands
 from bot.client import bot, handler, token, tree
 from bot.config import GUILD, GUILD_ID, MEMBER_ROLES, bot_data
 from bot.database import conn, cursor
-from bot.tasks import reminder_loop
-from bot.ui import JoinEventView
+from bot.tasks import reminder_loop, stat_leaderboard_loop
+from bot.ui import BadgeSubmissionReviewView, JoinEventView, StatSubmissionReviewView
 
 COGS = (
     "bot.cogs.events",
     "bot.cogs.players",
     "bot.cogs.teams",
     "bot.cogs.seasons",
+    "bot.cogs.stats",
 )
 
 
@@ -70,6 +71,28 @@ async def on_ready():
 
     if not reminder_loop.is_running():
         reminder_loop.start()
+
+    if not stat_leaderboard_loop.is_running():
+        stat_leaderboard_loop.start()
+
+    # Re-register a review view per still-pending stat/badge submission, same
+    # reason as the Join Event view above - button callbacks don't survive a
+    # restart unless the view (with its matching custom_id) is re-attached.
+    if not getattr(bot, "_stat_review_views_restored", False):
+        cursor.execute("SELECT id FROM stat_submissions WHERE status = 'pending'")
+        pending_stat_ids = [row[0] for row in cursor.fetchall()]
+        for submission_id in pending_stat_ids:
+            bot.add_view(StatSubmissionReviewView(submission_id))
+
+        cursor.execute("SELECT id FROM badge_submissions WHERE status = 'pending'")
+        pending_badge_ids = [row[0] for row in cursor.fetchall()]
+        for submission_id in pending_badge_ids:
+            bot.add_view(BadgeSubmissionReviewView(submission_id))
+
+        restored_count = len(pending_stat_ids) + len(pending_badge_ids)
+        if restored_count:
+            print(f"Restored {restored_count} pending submission review view(s) ✅")
+        bot._stat_review_views_restored = True
 
     print("Fetching division members...")
     try:

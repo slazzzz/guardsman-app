@@ -1,6 +1,5 @@
 ### EVENT COMMANDS ###
 
-import asyncio
 import csv
 from datetime import datetime, timedelta
 from io import StringIO

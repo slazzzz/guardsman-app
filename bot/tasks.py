@@ -8,8 +8,10 @@ from discord.ext import tasks
 
 from bot.client import bot
 from bot.database import conn, cursor
+from bot.leaderboard import build_stat_leaderboard_embed
 
 REMINDER_WINDOW = timedelta(hours=1)
+STAT_LEADERBOARD_TICK_MINUTES = 5
 
 
 @tasks.loop(minutes=1)
@@ -76,4 +78,75 @@ async def reminder_loop_error(error: Exception):
 
 @reminder_loop.before_loop
 async def before_reminder_loop():
+    await bot.wait_until_ready()
+
+
+@tasks.loop(minutes=STAT_LEADERBOARD_TICK_MINUTES)
+async def stat_leaderboard_loop():
+    """Ticks every STAT_LEADERBOARD_TICK_MINUTES and re-renders any configured
+    stat leaderboard whose own update_interval_minutes has elapsed since it was
+    last posted. The tick interval is deliberately shorter than most boards'
+    update_interval so each board's actual cadence stays close to what staff
+    configured via /leaderboard_stats_setup, without a separate asyncio task
+    per board."""
+    now = datetime.now()
+
+    try:
+        cursor.execute("""
+            SELECT stat_type, channel_id, message_id, update_interval_minutes, last_updated_at
+            FROM stat_leaderboards
+        """)
+        boards = cursor.fetchall()
+    except sqlite3.Error as e:
+        print(f"stat_leaderboard_loop: could not query stat_leaderboards, skipping this tick: {e}")
+        return
+
+    for stat_type, channel_id, message_id, interval_minutes, last_updated_at in boards:
+        if last_updated_at:
+            try:
+                last_updated = datetime.strptime(last_updated_at, "%Y-%m-%d %H:%M:%S")
+                if now - last_updated < timedelta(minutes=interval_minutes):
+                    continue
+            except (TypeError, ValueError):
+                pass  # malformed timestamp - fall through and just refresh it
+
+        try:
+            channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+            embed = await build_stat_leaderboard_embed(channel.guild, stat_type)
+            if embed is None:
+                continue
+
+            message = None
+            if message_id:
+                try:
+                    message = await channel.fetch_message(message_id)
+                except (discord.NotFound, discord.Forbidden):
+                    message = None
+
+            if message:
+                await message.edit(embed=embed)
+            else:
+                message = await channel.send(embed=embed)
+
+            cursor.execute(
+                "UPDATE stat_leaderboards SET message_id = ?, last_updated_at = CURRENT_TIMESTAMP WHERE stat_type = ?",
+                (message.id, stat_type)
+            )
+            conn.commit()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+            # Channel deleted, perms revoked, etc. - skip this board for now
+            # rather than letting one bad board stop the rest from updating.
+            print(f"stat_leaderboard_loop: could not update '{stat_type}' board: {e}")
+            continue
+
+
+@stat_leaderboard_loop.error
+async def stat_leaderboard_loop_error(error: Exception):
+    print(f"stat_leaderboard_loop crashed unexpectedly, restarting it: {error}")
+    if not stat_leaderboard_loop.is_running():
+        stat_leaderboard_loop.restart()
+
+
+@stat_leaderboard_loop.before_loop
+async def before_stat_leaderboard_loop():
     await bot.wait_until_ready()

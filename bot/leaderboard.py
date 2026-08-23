@@ -9,7 +9,9 @@ from discord import Embed, Interaction
 from PIL import Image, ImageDraw, ImageFont
 
 from bot.client import bot
-from bot.config import DEFAULT_PLACEMENT_COLOR, FALLBACK_AVATAR_PATH, FONT_PATH, PLACEMENT_COLORS
+from bot.config import DEFAULT_PLACEMENT_COLOR, FALLBACK_AVATAR_PATH, FONT_PATH, PLACEMENT_COLORS, STAT_TYPES
+from bot.database import cursor
+from bot.helpers import placement_line
 from bot.roblox import get_avatar_urls_batch
 
 
@@ -234,3 +236,74 @@ async def post_or_update_leaderboard_message(
 
     channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
     return await channel.send(embed=embed)
+
+
+### PLAYER STAT LEADERBOARDS ###
+# These sit alongside the event-leaderboard helpers above and reuse the same
+# leaderboard_image()/post_or_update_leaderboard_message() building blocks -
+# a stat leaderboard is really just a differently-sourced set of (discord_id,
+# value, roblox_id) rows.
+
+def get_stat_leaderboard_rows(stat_type: str, limit: int = 10) -> list[tuple[int, int, int]]:
+    """Top `limit` players for stat_type, highest value first, as
+    (discord_id, value, roblox_id) - the same shape leaderboard_image() expects."""
+    cursor.execute("""
+        SELECT players.discord_id, player_stats.value, players.roblox_id
+        FROM player_stats
+        JOIN players ON players.id = player_stats.player_id
+        WHERE player_stats.stat_type = ?
+        ORDER BY player_stats.value DESC
+        LIMIT ?
+    """, (stat_type, limit))
+    return cursor.fetchall()
+
+
+async def resolve_display_names_for_guild(guild: Optional[discord.Guild], user_ids: list[int]) -> dict[int, str]:
+    """Same job as resolve_display_names(), but usable from contexts with no
+    Interaction (e.g. the background auto-update loop in tasks.py)."""
+    names: dict[int, str] = {}
+    for user_id in user_ids:
+        member = guild.get_member(user_id) if guild else None
+        if member:
+            names[user_id] = member.display_name
+            continue
+        try:
+            user = await bot.fetch_user(user_id)
+            names[user_id] = user.name
+        except discord.NotFound:
+            names[user_id] = f"Unknown ({user_id})"
+    return names
+
+
+async def build_stat_leaderboard_embed(guild: Optional[discord.Guild], stat_type: str) -> Optional[Embed]:
+    """Builds the embed shown in an auto-updating leaderboard channel. Returns
+    None for an unknown stat_type so callers can report that cleanly."""
+    if stat_type not in STAT_TYPES:
+        return None
+
+    label, unit = STAT_TYPES[stat_type]
+    rows = get_stat_leaderboard_rows(stat_type)
+    names = await resolve_display_names_for_guild(guild, [row[0] for row in rows])
+
+    embed = Embed(title=f"🏆 {label}", color=discord.Color.gold())
+    if not rows:
+        embed.description = "No verified stats yet - be the first to submit one!"
+        return embed
+
+    embed.description = "".join(
+        placement_line(i, discord_id, value, label=unit)
+        for i, (discord_id, value, _roblox_id) in enumerate(rows)
+    )
+    return embed
+
+
+async def build_stat_leaderboard_image(guild: Optional[discord.Guild], stat_type: str) -> Optional[discord.File]:
+    """The on-request PNG version (e.g. from /profile or /leaderboard_stats image),
+    rendered on demand rather than kept in sync automatically - see stats.py."""
+    if stat_type not in STAT_TYPES:
+        return None
+
+    label, _unit = STAT_TYPES[stat_type]
+    rows = get_stat_leaderboard_rows(stat_type)
+    names = await resolve_display_names_for_guild(guild, [row[0] for row in rows])
+    return leaderboard_image(rows, names, title=label)

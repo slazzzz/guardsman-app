@@ -18,6 +18,65 @@ ROBLOX_MAX_RETRIES = 3
 ROBLOX_DEFAULT_BACKOFF_SECONDS = 1.5
 
 
+def get_badge_name(badge_id: int) -> Optional[str]:
+    """Looks up a badge's display name from its id, so /badge_submit doesn't need
+    a hardcoded list of every trackable Pressure badge - staff/players can submit
+    any badge id and this fills in the name for the review embed."""
+    response = _roblox_request("GET", f"https://badges.roblox.com/v1/badges/{badge_id}")
+    if response is None or response.status_code != 200:
+        return None
+    try:
+        return response.json().get("name")
+    except ValueError:
+        return None
+
+
+ROBLOX_BADGE_SCAN_PAGE_SIZE = 100
+ROBLOX_BADGE_SCAN_MAX_PAGES = 5  # caps the scan at 500 badges so a badge-heavy account can't hang this
+
+
+def roblox_owns_badge(roblox_id: int, badge_id: int) -> bool:
+    """Best-effort check of whether roblox_id owns badge_id, via Roblox's public
+    badges.roblox.com list endpoint.
+
+    IMPORTANT: this can only return a reliable True. Roblox has repeatedly changed
+    whether/how badge visibility respects the "who can see my inventory" privacy
+    setting, so a private inventory or a badge outside the scanned page window will
+    both come back as "not found" here indistinguishably from genuinely not owning
+    it. Callers must treat a False return as "couldn't confirm" and fall back to a
+    manual/screenshot review - never as proof the player doesn't have the badge.
+    """
+    if not roblox_id:
+        return False
+
+    cursor_token = None
+    for _ in range(ROBLOX_BADGE_SCAN_MAX_PAGES):
+        url = (
+            f"https://badges.roblox.com/v1/users/{roblox_id}/badges"
+            f"?limit={ROBLOX_BADGE_SCAN_PAGE_SIZE}&sortOrder=Desc"
+        )
+        if cursor_token:
+            url += f"&cursor={cursor_token}"
+
+        response = _roblox_request("GET", url)
+        if response is None or response.status_code != 200:
+            return False
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return False
+
+        if any(entry.get("id") == badge_id for entry in payload.get("data", [])):
+            return True
+
+        cursor_token = payload.get("nextPageCursor")
+        if not cursor_token:
+            break
+
+    return False
+
+
 def _roblox_request(method: str, url: str, **kwargs) -> Optional[requests.Response]:
     """Wraps requests.request with retry/backoff for Roblox's rate limiting.
 

@@ -4,7 +4,7 @@ import sqlite3
 
 from bot.config import DB_YEAR
 
-conn = sqlite3.connect(f"database/leaderboard_{DB_YEAR}.db", check_same_thread=False)
+conn = sqlite3.connect(f"database/leaderboard_{DB_YEAR}.db")
 cursor = conn.cursor()
 
 # SQLite does NOT enforce FOREIGN KEY constraints by default - it has to be
@@ -74,6 +74,93 @@ CREATE TABLE IF NOT EXISTS seasons (
 )
 """)
 
+# One row per (player, stat_type) - this is the *verified*, display-ready
+# value shown on profiles/leaderboards. source distinguishes how it got here
+# ('manual' = approved from a submission, 'admin' = trusted-admin direct add,
+# 'auto' = reserved for a future Open Cloud pull, unused today) since a
+# profile may want to show that distinction later even though all three
+# currently render identically.
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS player_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_id INTEGER,
+    stat_type TEXT,
+    value INTEGER DEFAULT 0,
+    source TEXT DEFAULT 'manual',
+    verified_by INTEGER,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY(player_id) REFERENCES players(id),
+    UNIQUE(player_id, stat_type)
+)
+""")
+
+# The approval queue. A row here is pending review until a staff member hits
+# Approve/Reject on the message it was posted with - approval is what copies
+# the value into player_stats, this table itself is just history/audit trail.
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS stat_submissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_id INTEGER,
+    stat_type TEXT,
+    value INTEGER,
+    proof_url TEXT,
+    status TEXT DEFAULT 'pending',
+    reviewed_by INTEGER,
+    submitted_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at TEXT,
+
+    FOREIGN KEY(player_id) REFERENCES players(id)
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS player_badges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_id INTEGER,
+    badge_name TEXT,
+    awarded_by INTEGER,
+    awarded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY(player_id) REFERENCES players(id),
+    UNIQUE(player_id, badge_name)
+)
+""")
+
+# Queue for /badge_submit when roblox_owns_badge() can't confirm ownership
+# outright (private inventory or a badge the scan didn't reach) - same
+# approve/reject shape as stat_submissions, kept separate since a badge
+# carries a badge_id/name instead of a numeric value.
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS badge_submissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_id INTEGER,
+    badge_id INTEGER,
+    badge_name TEXT,
+    proof_url TEXT,
+    status TEXT DEFAULT 'pending',
+    reviewed_by INTEGER,
+    submitted_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at TEXT,
+
+    FOREIGN KEY(player_id) REFERENCES players(id)
+)
+""")
+
+# Config for the auto-updating leaderboard channels - one row per stat_type
+# that's been set up with /leaderboard_stats_setup. message_id/last_updated_at
+# are maintained by the bot; the rest is set once by staff.
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS stat_leaderboards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stat_type TEXT UNIQUE,
+    channel_id INTEGER,
+    message_id INTEGER,
+    update_interval_minutes INTEGER DEFAULT 60,
+    last_updated_at TEXT
+)
+""")
+
 conn.commit()
 
 
@@ -96,6 +183,7 @@ ensure_column("events", "team_leaderboard_message_id", "INTEGER")
 ensure_column("events", "team_leaderboard_channel_id", "INTEGER")
 ensure_column("results", "team_id", "INTEGER")
 ensure_column("events", "season_id", "INTEGER")
+ensure_column("player_badges", "source", "TEXT DEFAULT 'manual'")  # 'manual' (admin), 'auto' (Roblox API confirmed), 'submitted' (staff-approved)
 
 
 def get_active_season_id() -> int:
