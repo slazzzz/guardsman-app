@@ -302,7 +302,7 @@ class StatsCog(commands.Cog):
 
     @app_commands.command(
         name="stat_bulk_add",
-        description="Bulk-set player stats from a file (discord_id,stat_type,value per line) - trusted admin, no review needed",
+        description="Bulk-set player stats from a file (discord_id,stat_type,value per line)",
     )
     @app_commands.guilds(GUILD_ID)
     @is_admin()
@@ -395,7 +395,7 @@ class StatsCog(commands.Cog):
 
     @app_commands.command(
         name="badge_bulk_add",
-        description="Bulk-award badges from a file (discord_id,badge_name per line) - trusted admin",
+        description="Bulk-award badges from a file (discord_id,badge_name per line)",
     )
     @app_commands.guilds(GUILD_ID)
     @is_admin()
