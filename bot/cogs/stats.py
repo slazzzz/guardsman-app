@@ -111,6 +111,7 @@ class StatsCog(commands.Cog):
         max_modifier_percentage=f"{STAT_TYPES['max_modifier_percentage'][0]} - leave blank if you're not submitting this one",
         proof="Screenshot(s) covering whichever stat(s) you filled in above",
     )
+    @is_allowed()
     async def stat_submit(
         self,
         interaction: Interaction,
@@ -229,7 +230,7 @@ class StatsCog(commands.Cog):
     @app_commands.command(name="stat_add", description="Directly set a player's stat (trusted admin, no review needed)")
     @app_commands.guilds(GUILD_ID)
     @app_commands.choices(stat_type=STAT_CHOICES)
-    @is_allowed()
+    @is_staff()
     async def stat_add(self, interaction: Interaction, user: Member, stat_type: app_commands.Choice[str], value: int):
         if value < 0:
             await interaction.response.send_message("Value can't be negative.", ephemeral=True)
@@ -249,7 +250,7 @@ class StatsCog(commands.Cog):
 
     @app_commands.command(name="badge_add", description="Award a badge to a player's profile (trusted admin)")
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
+    @is_staff()
     async def badge_add(self, interaction: Interaction, user: Member, badge_name: str):
         player_id = get_or_create_player_id(user.id)
         try:
@@ -269,40 +270,42 @@ class StatsCog(commands.Cog):
         description="Claim a Roblox badge for your profile (auto-awarded if you hold the linked role)"
     )
     @app_commands.guilds(GUILD_ID)
+    @is_allowed()
     async def badge_submit(
         self,
         interaction: Interaction,
-        badge_id: int,
-        proof: Optional[discord.Attachment] = None,
+        proof: discord.Attachment,
+        badge_id: Optional[int] = None,
         proof_2: Optional[discord.Attachment] = None,
         proof_3: Optional[discord.Attachment] = None,
     ):
         await interaction.response.defer(ephemeral=True)
 
-        badge_name = get_badge_name(badge_id)
-        if badge_name is None:
-            await interaction.followup.send(f"Couldn't find a Roblox badge with id `{badge_id}`.", ephemeral=True)
-            return
-
-        player_id = get_or_create_player_id(interaction.user.id)
-
-        # Role-based check first: if this badge is mapped to a Discord role
-        # and the submitter already holds it, award immediately - no proof,
-        # no queue. member.roles works here since this command is guild-only.
-        linked_role_id = BADGE_ROLE_IDS.get(badge_id)
-        if linked_role_id and any(role.id == linked_role_id for role in interaction.user.roles):
-            try:
-                cursor.execute(
-                    "INSERT INTO player_badges (player_id, badge_name, awarded_by, source) VALUES (?, ?, ?, 'role')",
-                    (player_id, badge_name, interaction.user.id)
-                )
-                conn.commit()
-            except sqlite3.IntegrityError:
-                await interaction.followup.send(f"You already have **{badge_name}** on your profile.", ephemeral=True)
+        if badge_id:
+            badge_name = get_badge_name(badge_id)
+            if badge_name is None:
+                await interaction.followup.send(f"Couldn't find a Roblox badge with id `{badge_id}`.", ephemeral=True)
                 return
 
-            await interaction.followup.send(f"✅ Verified via your linked role - **{badge_name}** is now on your profile.", ephemeral=True)
-            return
+            player_id = get_or_create_player_id(interaction.user.id)
+
+            # Role-based check first: if this badge is mapped to a Discord role
+            # and the submitter already holds it, award immediately - no proof,
+            # no queue. member.roles works here since this command is guild-only.
+            linked_role_id = BADGE_ROLE_IDS.get(badge_id)
+            if linked_role_id and any(role.id == linked_role_id for role in interaction.user.roles):
+                try:
+                    cursor.execute(
+                        "INSERT INTO player_badges (player_id, badge_name, awarded_by, source) VALUES (?, ?, ?, 'role')",
+                        (player_id, badge_name, interaction.user.id)
+                    )
+                    conn.commit()
+                except sqlite3.IntegrityError:
+                    await interaction.followup.send(f"You already have **{badge_name}** on your profile.", ephemeral=True)
+                    return
+
+                await interaction.followup.send(f"✅ Verified via your linked role - **{badge_name}** is now on your profile.", ephemeral=True)
+                return
 
         # No role match (either nothing's mapped for this badge, or the
         # submitter doesn't currently hold it) - fall back to a
@@ -368,7 +371,7 @@ class StatsCog(commands.Cog):
         description="Re-check a member's badge roles and award any matching badges (staff)"
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
+    @is_staff()
     async def badge_role_sync(self, interaction: Interaction, user: Member):
         if not BADGE_ROLE_IDS:
             await interaction.response.send_message(
@@ -412,7 +415,7 @@ class StatsCog(commands.Cog):
 
     @app_commands.command(name="badge_remove", description="Remove a badge from a player's profile (trusted admin)")
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
+    @is_staff()
     async def badge_remove(self, interaction: Interaction, user: Member, badge_name: str):
         player_id = get_or_create_player_id(user.id)
         cursor.execute(
@@ -429,6 +432,7 @@ class StatsCog(commands.Cog):
 
     @app_commands.command(name="profile", description="Show a division member's Pressure stats card")
     @app_commands.guilds(GUILD_ID)
+    @is_allowed()
     async def profile(self, interaction: Interaction, user: Optional[Member] = None):
         member = user or interaction.user
 
@@ -481,7 +485,7 @@ class StatsCog(commands.Cog):
     @app_commands.command(name="leaderboard_stats_setup", description="Set an auto-updating leaderboard channel for a stat (staff)")
     @app_commands.guilds(GUILD_ID)
     @app_commands.choices(stat_type=STAT_CHOICES)
-    @is_allowed()
+    @is_staff()
     async def leaderboard_stats_setup(
         self,
         interaction: Interaction,
@@ -517,6 +521,7 @@ class StatsCog(commands.Cog):
     @app_commands.command(name="leaderboard_stats_image", description="Render a stat leaderboard as an image, on demand")
     @app_commands.guilds(GUILD_ID)
     @app_commands.choices(stat_type=STAT_CHOICES)
+    @is_staff()
     async def leaderboard_stats_image(self, interaction: Interaction, stat_type: app_commands.Choice[str]):
         await interaction.response.defer()
         file = await build_stat_leaderboard_image(interaction.guild, stat_type.value)

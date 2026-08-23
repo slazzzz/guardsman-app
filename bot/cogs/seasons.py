@@ -62,7 +62,7 @@ class SeasonsCog(commands.Cog):
         description="Cumulative leaderboard for a season (default: the current one).",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
+    @is_staff()
     async def season_leaderboard(self, interaction: Interaction, season_number: int = 0, top: int = 10):
         if top <= 0:
             await interaction.response.send_message("top must be greater than 0.", ephemeral=True)

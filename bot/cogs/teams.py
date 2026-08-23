@@ -20,7 +20,7 @@ class TeamsCog(commands.Cog):
         description="Create a new team.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
+    @is_staff()
     async def team_add(self, interaction: Interaction, name: str):
         try:
             cursor.execute("INSERT INTO teams (team_name) VALUES (?)", (name,))
@@ -35,7 +35,7 @@ class TeamsCog(commands.Cog):
         description="Delete a team. Members keep their individual results but lose their team tag.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_admin()
+    @is_staff()
     async def team_remove(self, interaction: Interaction, name: str):
         cursor.execute("SELECT id FROM teams WHERE team_name = ?", (name,))
         team = cursor.fetchone()
@@ -67,7 +67,7 @@ class TeamsCog(commands.Cog):
         description="Assign a player to a team for a specific event.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
+    @is_staff()
     async def team_assign(self, interaction: Interaction, user: Member, team: str, event_number: int = 0):
         event = await require_event(interaction, event_number)
         if event is None:
@@ -113,7 +113,7 @@ class TeamsCog(commands.Cog):
         description="Remove a player from their team for a specific event.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
+    @is_staff()
     async def team_unassign(self, interaction: Interaction, user: Member, event_number: int = 0):
         event = await require_event(interaction, event_number)
         if event is None:
@@ -139,7 +139,7 @@ class TeamsCog(commands.Cog):
         description="List all teams and their member counts for an event.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
+    @is_staff()
     async def team_list(self, interaction: Interaction, event_number: int = 0):
         event = await require_event(interaction, event_number)
         if event is None:
@@ -168,7 +168,7 @@ class TeamsCog(commands.Cog):
         description="Display team totals for an event. Players without a team still show up individually.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
+    @is_staff()
     async def team_leaderboard(self, interaction: Interaction, event_number: int = 0, display_in_channel: bool = False):
         event = await require_event(interaction, event_number)
         if event is None:
@@ -232,7 +232,7 @@ class TeamsCog(commands.Cog):
         description="Bulk create teams from a CSV/text file (one team name per line).",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
+    @is_admin()
     async def team_bulk_add(self, interaction: Interaction, file: discord.Attachment):
         if not file.filename.lower().endswith((".csv", ".txt")):
             await interaction.response.send_message("Please attach a .csv or .txt file.", ephemeral=True)
@@ -334,7 +334,7 @@ class TeamsCog(commands.Cog):
         description="Bulk rename teams from a CSV/text file (old_name,new_name).",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
+    @is_admin()
     async def team_bulk_update(self, interaction: Interaction, file: discord.Attachment):
         await interaction.response.defer(thinking=True, ephemeral=True)
 
@@ -388,7 +388,7 @@ class TeamsCog(commands.Cog):
         description="Bulk assign players to teams for an event from a CSV file (discord_id,team_name).",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
+    @is_admin()
     async def team_bulk_assign(self, interaction: Interaction, file: discord.Attachment, event_number: int = 0):
         event = await require_event(interaction, event_number)
         if event is None:
@@ -475,7 +475,7 @@ class TeamsCog(commands.Cog):
         description="Bulk remove players from their teams for an event from a CSV file (one discord_id per line).",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
+    @is_admin()
     async def team_bulk_unassign(self, interaction: Interaction, file: discord.Attachment, event_number: int = 0):
         event = await require_event(interaction, event_number)
         if event is None:
