@@ -686,7 +686,7 @@ class StatsCog(commands.Cog):
 
         return embed
 
-    @app_commands.command(name="profile", description="Show your own Pressure stats card")
+    @app_commands.command(name="guardsman_profile", description="Show your own Pressure stats card")
     @app_commands.guilds(GUILD_ID)
     @is_allowed()
     async def profile(self, interaction: Interaction):
@@ -697,7 +697,7 @@ class StatsCog(commands.Cog):
 
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="profile_lookup", description="Show another division member's Pressure stats card (staff)")
+    @app_commands.command(name="guardsman_profile_lookup", description="Show another division member's Pressure stats card (staff)")
     @app_commands.guilds(GUILD_ID)
     @is_admin_or_staff()
     async def profile_lookup(self, interaction: Interaction, user: Member):
