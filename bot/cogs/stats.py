@@ -479,6 +479,10 @@ class StatsCog(commands.Cog):
             await interaction.followup.send(f"Couldn't find a Roblox badge with id `{badge_id}`.", ephemeral=True)
             return
 
+        if not badge_id in BADGE_ROLE_IDS.keys():
+            await interaction.followup.send(f"This badge is not available for submission.", ephemeral=True)
+            return
+
         player_id = get_or_create_player_id(interaction.user.id)
 
         # Role-based check first: if this badge is mapped to a Discord role
