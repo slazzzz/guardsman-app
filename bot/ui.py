@@ -8,7 +8,9 @@ from discord import Embed, Interaction
 
 from bot.config import ADMIN_USERS, STAFF_ROLES
 from bot.database import conn, cursor
+from bot.lookups import upsert_player_roblox_id
 from bot.roblox import get_roblox_id_from_username
+from bot.verification import VERIFICATION_TTL, clear_verification, start_verification, verify_pending
 
 
 def _is_staff_member(interaction: Interaction) -> bool:
@@ -24,26 +26,14 @@ def _is_staff_member(interaction: Interaction) -> bool:
 
 async def _register_for_event(interaction: Interaction, roblox_id: int, event_id: int):
     """Shared tail end of joining an event: upsert the player row with
-    roblox_id, then insert their event registration. Used both when a fresh
-    Roblox username was just resolved (JoinEventModal) and when the member
-    already had a linked account (JoinEventView.join skips the modal
-    entirely in that case)."""
+    roblox_id, then insert their event registration. Used both when a Roblox
+    username was just verified (JoinEventModal, via RobloxVerificationView)
+    and when the member already had a verified account linked (JoinEventView
+    .join skips the modal/verification entirely in that case)."""
     user_id = interaction.user.id
+    upsert_player_roblox_id(user_id, roblox_id)
 
-    cursor.execute(
-        "INSERT OR IGNORE INTO players (discord_id, roblox_id) VALUES (?, ?)",
-        (user_id, roblox_id)
-    )
-
-    cursor.execute(
-        "UPDATE players SET roblox_id = ? WHERE discord_id = ?",
-        (roblox_id, user_id)
-    )
-
-    cursor.execute(
-        "SELECT id FROM players WHERE discord_id = ?",
-        (user_id,)
-    )
+    cursor.execute("SELECT id FROM players WHERE discord_id = ?", (user_id,))
     player_id = cursor.fetchone()[0]
 
     try:
@@ -64,6 +54,65 @@ async def _register_for_event(interaction: Interaction, roblox_id: int, event_id
         )
 
 
+class RobloxVerificationView(discord.ui.View):
+    """Shown after start_verification() generates a code - the member pastes
+    it into their Roblox profile's About section, then presses Confirm to
+    have it checked against the live Roblox API. Reused by both the event
+    join flow below and /roblox_link (players.py) since both need the same
+    "prove you own this account" step before a link is accepted.
+
+    on_verified is an async callback(interaction, roblox_id) that performs
+    whatever the caller actually wanted once ownership is confirmed (e.g.
+    upserting the players table, or also registering for an event) - this
+    view only handles the proof step, not what happens after.
+    """
+
+    def __init__(self, discord_id: int, on_verified):
+        super().__init__(timeout=VERIFICATION_TTL.total_seconds())
+        self.discord_id = discord_id
+        self._on_verified = on_verified
+
+    async def interaction_check(self, interaction: Interaction) -> bool:
+        if interaction.user.id != self.discord_id:
+            await interaction.response.send_message("This verification isn't for you.", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        clear_verification(self.discord_id)
+
+    @discord.ui.button(label="I've added the code - Confirm", style=discord.ButtonStyle.green)
+    async def confirm(self, interaction: Interaction, button: discord.ui.Button):
+        success, roblox_id, error = verify_pending(self.discord_id)
+        if not success:
+            await interaction.response.send_message(error, ephemeral=True)
+            return
+
+        for item in self.children:
+            item.disabled = True
+        self.stop()
+
+        await self._on_verified(interaction, roblox_id)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: Interaction, button: discord.ui.Button):
+        clear_verification(self.discord_id)
+        self.stop()
+        await interaction.response.edit_message(content="Verification cancelled.", view=None)
+
+
+def verification_prompt(code: str) -> str:
+    """Shared copy for the "paste this code into your Roblox profile" message,
+    so /roblox_link and the event join form read identically."""
+    minutes = int(VERIFICATION_TTL.total_seconds() // 60)
+    return (
+        f"To prove this is your account, open your Roblox profile, edit your **About** "
+        f"section, and paste this code anywhere in it:\n\n`{code}`\n\n"
+        f"Then press **Confirm** below. This expires in {minutes} minutes - you can remove "
+        f"the code from your profile afterward."
+    )
+
+
 class JoinEventModal(discord.ui.Modal, title="Join Event"):
     roblox_username = discord.ui.TextInput(
         label="Roblox Username",
@@ -73,8 +122,26 @@ class JoinEventModal(discord.ui.Modal, title="Join Event"):
 
     async def on_submit(self, interaction: Interaction):
         roblox_username = self.roblox_username.value
-        roblox_id = get_roblox_id_from_username(roblox_username) or 0
-        await _register_for_event(interaction, roblox_id, self.event_id)
+        roblox_id = get_roblox_id_from_username(roblox_username)
+
+        if roblox_id is None:
+            await interaction.response.send_message(
+                f"Couldn't find a Roblox account named '{roblox_username}' - double check the spelling and try again.",
+                ephemeral=True
+            )
+            return
+
+        event_id = self.event_id
+        code = start_verification(interaction.user.id, roblox_id)
+
+        async def _on_verified(confirm_interaction: Interaction, verified_roblox_id: int):
+            await _register_for_event(confirm_interaction, verified_roblox_id, event_id)
+
+        await interaction.response.send_message(
+            verification_prompt(code),
+            view=RobloxVerificationView(interaction.user.id, _on_verified),
+            ephemeral=True
+        )
 
 
 class JoinEventView(discord.ui.View):
@@ -88,10 +155,11 @@ class JoinEventView(discord.ui.View):
 
     @discord.ui.button(label="Join Event", style=discord.ButtonStyle.green)
     async def join(self, interaction: Interaction, button: discord.ui.Button):
-        # If this member already has a Roblox account linked (self-service
-        # /roblox_link, or a staff /player_roblox_id_update), skip the modal
-        # entirely and register them directly with the account already on
-        # file - no reason to make them retype a username we already have.
+        # If this member already has a verified Roblox account linked
+        # (self-service /roblox_link, or a staff /player_roblox_id_update),
+        # skip the modal and verification entirely and register them
+        # directly with the account already on file - no reason to make them
+        # re-prove ownership every time they join an event.
         cursor.execute("SELECT roblox_id FROM players WHERE discord_id = ?", (interaction.user.id,))
         row = cursor.fetchone()
         if row and row[0]:

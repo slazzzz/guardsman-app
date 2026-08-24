@@ -147,6 +147,21 @@ CREATE TABLE IF NOT EXISTS badge_submissions (
 )
 """)
 
+# Holds an in-flight "prove you own this Roblox account" attempt - see
+# bot/verification.py. One row per discord_id (a fresh /roblox_link attempt
+# or event-join attempt overwrites any earlier pending one for that member,
+# it doesn't stack). code is what they're asked to paste into their Roblox
+# profile's About section; created_at is what verify_pending() checks
+# against VERIFICATION_TTL to expire stale attempts.
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS roblox_verifications (
+    discord_id INTEGER PRIMARY KEY,
+    roblox_id INTEGER,
+    code TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
 # Config for the auto-updating leaderboard channels - one row per stat_type
 # that's been set up with /leaderboard_stats_setup. message_id/last_updated_at
 # are maintained by the bot; the rest is set once by staff.

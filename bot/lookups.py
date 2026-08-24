@@ -6,7 +6,7 @@ from typing import Optional
 
 from discord import Interaction, Member
 
-from bot.database import cursor
+from bot.database import conn, cursor
 from bot.roblox import get_roblox_id_from_username
 
 
@@ -51,6 +51,23 @@ async def require_results(interaction: Interaction, player_id: int, event_id: in
         return None
 
     return result
+
+
+def upsert_player_roblox_id(discord_id: int, roblox_id: int):
+    """Creates the player row if discord_id doesn't have one yet, otherwise
+    updates its roblox_id. The single write path for linking a Discord member
+    to a Roblox account - used by the verified self-service /roblox_link flow,
+    the event-join form, and the staff /player_roblox_id_update command, so
+    all three stay consistent instead of each hand-rolling their own
+    insert-or-update."""
+    cursor.execute("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
+    player = cursor.fetchone()
+
+    if player:
+        cursor.execute("UPDATE players SET roblox_id = ? WHERE discord_id = ?", (roblox_id, discord_id))
+    else:
+        cursor.execute("INSERT INTO players (discord_id, roblox_id) VALUES (?, ?)", (discord_id, roblox_id))
+    conn.commit()
 
 
 def resolve_roblox_ref(raw: str) -> tuple[Optional[int], Optional[str]]:

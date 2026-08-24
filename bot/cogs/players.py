@@ -217,16 +217,18 @@ class PlayersCog(commands.Cog):
             await interaction.response.send_message("Give a Roblox username or numeric ID.", ephemeral=True)
             return
 
-        cursor.execute("SELECT id FROM players WHERE discord_id = ?", (interaction.user.id,))
-        player = cursor.fetchone()
-        if player:
-            cursor.execute("UPDATE players SET roblox_id = ? WHERE discord_id = ?", (roblox_id, interaction.user.id))
-        else:
-            cursor.execute("INSERT INTO players (discord_id, roblox_id) VALUES (?, ?)", (interaction.user.id, roblox_id))
-        conn.commit()
+        code = start_verification(interaction.user.id, roblox_id)
+
+        async def _on_verified(confirm_interaction: Interaction, verified_roblox_id: int):
+            upsert_player_roblox_id(confirm_interaction.user.id, verified_roblox_id)
+            await confirm_interaction.response.send_message(
+                "Linked ✅ - your Roblox account is set, your avatar will show up on `/profile` now.",
+                ephemeral=True
+            )
 
         await interaction.response.send_message(
-            "Linked ✅ - your Roblox account is set, your avatar will show up on `/profile` now.",
+            verification_prompt(code),
+            view=RobloxVerificationView(interaction.user.id, _on_verified),
             ephemeral=True
         )
 
@@ -247,21 +249,7 @@ class PlayersCog(commands.Cog):
             return
 
         try:
-            cursor.execute("SELECT id FROM players WHERE discord_id = ?", (user.id,))
-            player = cursor.fetchone()
-
-            if player:
-                cursor.execute(
-                    "UPDATE players SET roblox_id = ? WHERE discord_id = ?",
-                    (roblox_id, user.id)
-                )
-            else:
-                cursor.execute(
-                    "INSERT INTO players (discord_id, roblox_id) VALUES (?, ?)",
-                    (user.id, roblox_id)
-                )
-            conn.commit()
-
+            upsert_player_roblox_id(user.id, roblox_id)
             await interaction.response.send_message(f"Roblox account linked for <@{user.id}> ✅", ephemeral=True)
         except Exception as e:
             print(f"Could not update player results in database: {e}")
