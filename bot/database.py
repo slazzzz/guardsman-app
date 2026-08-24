@@ -4,7 +4,7 @@ import sqlite3
 
 from bot.config import DB_YEAR
 
-conn = sqlite3.connect(f"database/leaderboard_{DB_YEAR}.db")
+conn = sqlite3.connect(f"database/leaderboard_{DB_YEAR}.db", check_same_thread=False)
 cursor = conn.cursor()
 
 # SQLite does NOT enforce FOREIGN KEY constraints by default - it has to be
