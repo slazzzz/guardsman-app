@@ -12,11 +12,32 @@ import requests
 from bot.database import conn, cursor
 
 roblox_username_cache: dict[int, str] = {}
-roblox_avatar_cache: dict[int, str] = {}
-roblox_full_avatar_cache: dict[int, str] = {}
+# Avatar caches store (url, cached_at) tuples rather than bare strings so
+# freshness can be checked on every read (see _avatar_cache_fresh below), not
+# just once at startup in load_roblox_cache() - otherwise an entry loaded (or
+# fetched) at process start would be served forever regardless of
+# ROBLOX_AVATAR_CACHE_TTL_SECONDS, until the bot restarts.
+roblox_avatar_cache: dict[int, tuple[str, datetime]] = {}
+roblox_full_avatar_cache: dict[int, tuple[str, datetime]] = {}
 
 ROBLOX_MAX_RETRIES = 3
 ROBLOX_DEFAULT_BACKOFF_SECONDS = 1.5
+
+# Avatars change more often than usernames, so unlike roblox_username_cache
+# (which never expires), avatar cache entries go stale after this long -
+# checked on every read via _avatar_cache_fresh(), not just at startup.
+ROBLOX_AVATAR_CACHE_TTL_SECONDS = 30 * 60  # 30 minutes
+
+
+def _avatar_cache_fresh(entry: Optional[tuple[str, datetime]]) -> bool:
+    """True if entry is a (url, cached_at) tuple younger than the TTL. Used by
+    every avatar read path so a stale entry - whether it's been sitting in
+    memory since this process started or was just loaded from roblox_cache -
+    is treated as a cache miss and re-fetched from Roblox."""
+    if entry is None:
+        return False
+    _, cached_at = entry
+    return (datetime.now() - cached_at).total_seconds() < ROBLOX_AVATAR_CACHE_TTL_SECONDS
 
 
 def get_badge_name(badge_id: int) -> Optional[str]:
@@ -150,8 +171,9 @@ def get_avatar_url(roblox_id: int) -> Optional[str]:
     get_avatar_urls_batch() instead so multiple players are fetched in one
     Roblox API call. For a full-body avatar (e.g. /profile), use
     get_full_avatar_url() instead."""
-    if roblox_avatar_cache.get(roblox_id):
-        return roblox_avatar_cache[roblox_id]
+    cached = roblox_avatar_cache.get(roblox_id)
+    if _avatar_cache_fresh(cached):
+        return cached[0]
 
     urls = get_avatar_urls_batch([roblox_id])
     return urls.get(roblox_id)
@@ -161,8 +183,9 @@ def get_full_avatar_url(roblox_id: int) -> Optional[str]:
     """Single-id FULL-BODY avatar lookup (as opposed to get_avatar_url()'s
     headshot crop) - what /profile uses so a member's whole avatar shows up
     instead of just their face."""
-    if roblox_full_avatar_cache.get(roblox_id):
-        return roblox_full_avatar_cache[roblox_id]
+    cached = roblox_full_avatar_cache.get(roblox_id)
+    if _avatar_cache_fresh(cached):
+        return cached[0]
 
     urls = get_full_avatar_urls_batch([roblox_id])
     return urls.get(roblox_id)
@@ -191,8 +214,8 @@ def get_avatar_urls_batch(roblox_ids: list[int]) -> dict[int, str]:
             continue
         seen.add(roblox_id)
         cached = roblox_avatar_cache.get(roblox_id)
-        if cached:
-            results[roblox_id] = cached
+        if _avatar_cache_fresh(cached):
+            results[roblox_id] = cached[0]
         else:
             missing.append(roblox_id)
 
@@ -240,8 +263,8 @@ def get_full_avatar_urls_batch(roblox_ids: list[int]) -> dict[int, str]:
             continue
         seen.add(roblox_id)
         cached = roblox_full_avatar_cache.get(roblox_id)
-        if cached:
-            results[roblox_id] = cached
+        if _avatar_cache_fresh(cached):
+            results[roblox_id] = cached[0]
         else:
             missing.append(roblox_id)
 
@@ -276,34 +299,31 @@ def get_full_avatar_urls_batch(roblox_ids: list[int]) -> dict[int, str]:
 
 ### ROBLOX CACHE PERSISTENCE ###
 
-ROBLOX_AVATAR_CACHE_TTL_SECONDS = 6 * 60 * 60  # avatars change more often than usernames
-
-
 def load_roblox_cache():
     cursor.execute("SELECT roblox_id, username FROM roblox_cache WHERE username IS NOT NULL")
     for roblox_id, username in cursor.fetchall():
         roblox_username_cache[roblox_id] = username
 
+    # Freshness is enforced on every read via _avatar_cache_fresh(), so loading
+    # here just needs to parse the stored timestamp - a stale row still gets
+    # loaded, it'll just be treated as a miss (and re-fetched) the first time
+    # something asks for it, instead of being silently dropped for the rest
+    # of the process's life like an un-cached id would be.
     cursor.execute("SELECT roblox_id, avatar_url, updated_at FROM roblox_cache WHERE avatar_url IS NOT NULL")
-    now = datetime.now()
     for roblox_id, avatar_url, updated_at in cursor.fetchall():
         try:
-            age_seconds = (now - datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")).total_seconds()
+            cached_at = datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
         except (TypeError, ValueError):
-            age_seconds = float("inf")
-
-        if age_seconds < ROBLOX_AVATAR_CACHE_TTL_SECONDS:
-            roblox_avatar_cache[roblox_id] = avatar_url
+            continue
+        roblox_avatar_cache[roblox_id] = (avatar_url, cached_at)
 
     cursor.execute("SELECT roblox_id, full_avatar_url, updated_at FROM roblox_cache WHERE full_avatar_url IS NOT NULL")
     for roblox_id, full_avatar_url, updated_at in cursor.fetchall():
         try:
-            age_seconds = (now - datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")).total_seconds()
+            cached_at = datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
         except (TypeError, ValueError):
-            age_seconds = float("inf")
-
-        if age_seconds < ROBLOX_AVATAR_CACHE_TTL_SECONDS:
-            roblox_full_avatar_cache[roblox_id] = full_avatar_url
+            continue
+        roblox_full_avatar_cache[roblox_id] = (full_avatar_url, cached_at)
 
 
 def cache_roblox_username(roblox_id: int, username: str):
@@ -316,7 +336,7 @@ def cache_roblox_username(roblox_id: int, username: str):
 
 
 def cache_roblox_avatar(roblox_id: int, avatar_url: str):
-    roblox_avatar_cache[roblox_id] = avatar_url
+    roblox_avatar_cache[roblox_id] = (avatar_url, datetime.now())
     cursor.execute("""
         INSERT INTO roblox_cache (roblox_id, avatar_url, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(roblox_id) DO UPDATE SET avatar_url = excluded.avatar_url, updated_at = CURRENT_TIMESTAMP
@@ -325,7 +345,7 @@ def cache_roblox_avatar(roblox_id: int, avatar_url: str):
 
 
 def cache_roblox_full_avatar(roblox_id: int, full_avatar_url: str):
-    roblox_full_avatar_cache[roblox_id] = full_avatar_url
+    roblox_full_avatar_cache[roblox_id] = (full_avatar_url, datetime.now())
     cursor.execute("""
         INSERT INTO roblox_cache (roblox_id, full_avatar_url, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(roblox_id) DO UPDATE SET full_avatar_url = excluded.full_avatar_url, updated_at = CURRENT_TIMESTAMP
