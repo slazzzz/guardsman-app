@@ -80,7 +80,7 @@ BADGE_ROLE_IDS: dict[int, int] = {int(k): v for k, v in stats_data.get("badge_ro
 STAT_TYPES: dict[str, tuple[str, str]] = {
     "hadal_wins": ("Hadal Blacksite Wins", "Win"),
     "endless_record": ("Endless Record", "Door"),
-    "modifier_wins": ("Modified Run Wins", "Win"),
+    "modifier_wins": ("Modified Run Wins (Total)", "Win"),
     "death_count": ("Deaths", "Death"),
     "heartburn_score": ("Heartburn Score", "Point"),
     "heartburn_wins": ("Heartburn Wins", "Win"),
