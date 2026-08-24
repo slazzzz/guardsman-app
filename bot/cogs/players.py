@@ -233,27 +233,36 @@ class PlayersCog(commands.Cog):
 
     @app_commands.command(
         name="player_roblox_id_update",
-        description="Update a player's Roblox ID.",
+        description="Manually link (or relink) a member to their Roblox account.",
     )
     @app_commands.guilds(GUILD_ID)
     @is_admin_or_staff()
-    async def player_roblox_id_update(self, interaction: Interaction, user: Member, roblox_id: int):
-        if roblox_id <= 0:
-            await interaction.response.send_message("roblox_id must be greater than 0.", ephemeral=True)
+    async def player_roblox_id_update(self, interaction: Interaction, user: Member, roblox_id_or_username: str):
+        roblox_id, error = resolve_roblox_ref(roblox_id_or_username)
+        if error:
+            await interaction.response.send_message(f"Couldn't link that - {error}.", ephemeral=True)
             return
-
-        player = await require_player(interaction, user)
-        if player is None:
+        if roblox_id is None:
+            await interaction.response.send_message("Give a Roblox username or numeric ID.", ephemeral=True)
             return
 
         try:
-            cursor.execute(
-                "UPDATE players SET roblox_id = ? WHERE discord_id = ?",
-                (roblox_id, user.id)
-            )
+            cursor.execute("SELECT id FROM players WHERE discord_id = ?", (user.id,))
+            player = cursor.fetchone()
+
+            if player:
+                cursor.execute(
+                    "UPDATE players SET roblox_id = ? WHERE discord_id = ?",
+                    (roblox_id, user.id)
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO players (discord_id, roblox_id) VALUES (?, ?)",
+                    (user.id, roblox_id)
+                )
             conn.commit()
 
-            await interaction.response.send_message(f"Roblox ID updated for <@{user.id}> ✅", ephemeral=True)
+            await interaction.response.send_message(f"Roblox account linked for <@{user.id}> ✅", ephemeral=True)
         except Exception as e:
             print(f"Could not update player results in database: {e}")
 

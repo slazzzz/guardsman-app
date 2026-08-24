@@ -22,6 +22,48 @@ def _is_staff_member(interaction: Interaction) -> bool:
     return interaction.user.guild_permissions.manage_guild
 
 
+async def _register_for_event(interaction: Interaction, roblox_id: int, event_id: int):
+    """Shared tail end of joining an event: upsert the player row with
+    roblox_id, then insert their event registration. Used both when a fresh
+    Roblox username was just resolved (JoinEventModal) and when the member
+    already had a linked account (JoinEventView.join skips the modal
+    entirely in that case)."""
+    user_id = interaction.user.id
+
+    cursor.execute(
+        "INSERT OR IGNORE INTO players (discord_id, roblox_id) VALUES (?, ?)",
+        (user_id, roblox_id)
+    )
+
+    cursor.execute(
+        "UPDATE players SET roblox_id = ? WHERE discord_id = ?",
+        (roblox_id, user_id)
+    )
+
+    cursor.execute(
+        "SELECT id FROM players WHERE discord_id = ?",
+        (user_id,)
+    )
+    player_id = cursor.fetchone()[0]
+
+    try:
+        cursor.execute(
+            "INSERT INTO results (player_id, player_score, event_id) VALUES (?, 0, ?)",
+            (player_id, event_id)
+        )
+        conn.commit()
+
+        await interaction.response.send_message(
+            "Registered successfully ✅",
+            ephemeral=True
+        )
+    except sqlite3.IntegrityError:
+        await interaction.response.send_message(
+            "You are already registered.",
+            ephemeral=True
+        )
+
+
 class JoinEventModal(discord.ui.Modal, title="Join Event"):
     roblox_username = discord.ui.TextInput(
         label="Roblox Username",
@@ -30,42 +72,9 @@ class JoinEventModal(discord.ui.Modal, title="Join Event"):
     )
 
     async def on_submit(self, interaction: Interaction):
-        user_id = interaction.user.id
         roblox_username = self.roblox_username.value
         roblox_id = get_roblox_id_from_username(roblox_username) or 0
-
-        cursor.execute(
-            "INSERT OR IGNORE INTO players (discord_id, roblox_id) VALUES (?, ?)",
-            (user_id, roblox_id)
-        )
-
-        cursor.execute(
-            "UPDATE players SET roblox_id = ? WHERE discord_id = ?",
-            (roblox_id, user_id)
-        )
-
-        cursor.execute(
-            "SELECT id FROM players WHERE discord_id = ?",
-            (user_id,)
-        )
-        player_id = cursor.fetchone()[0]
-
-        try:
-            cursor.execute(
-                "INSERT INTO results (player_id, player_score, event_id) VALUES (?, 0, ?)",
-                (player_id, self.event_id)
-            )
-            conn.commit()
-
-            await interaction.response.send_message(
-                "Registered successfully ✅",
-                ephemeral=True
-            )
-        except sqlite3.IntegrityError:
-            await interaction.response.send_message(
-                "You are already registered.",
-                ephemeral=True
-            )
+        await _register_for_event(interaction, roblox_id, self.event_id)
 
 
 class JoinEventView(discord.ui.View):
@@ -79,6 +88,16 @@ class JoinEventView(discord.ui.View):
 
     @discord.ui.button(label="Join Event", style=discord.ButtonStyle.green)
     async def join(self, interaction: Interaction, button: discord.ui.Button):
+        # If this member already has a Roblox account linked (self-service
+        # /roblox_link, or a staff /player_roblox_id_update), skip the modal
+        # entirely and register them directly with the account already on
+        # file - no reason to make them retype a username we already have.
+        cursor.execute("SELECT roblox_id FROM players WHERE discord_id = ?", (interaction.user.id,))
+        row = cursor.fetchone()
+        if row and row[0]:
+            await _register_for_event(interaction, row[0], self.event_id)
+            return
+
         modal = JoinEventModal()
         modal.event_id = self.event_id
         await interaction.response.send_modal(modal)
