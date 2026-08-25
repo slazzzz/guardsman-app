@@ -13,7 +13,7 @@ class RolesCog(commands.Cog):
         self.bot = bot
 
     @app_commands.command(
-        name="guardsman_role_update",
+        name="guardsman_role_add",
         description="Add a Guardsman role to a user."
     )
     @app_commands.guilds(GUILD_ID)
@@ -22,7 +22,7 @@ class RolesCog(commands.Cog):
         role="The Guardsman role to add."
     )
     @is_admin_or_staff()
-    async def guardsman_role_update(self, interaction: Interaction, member: Member, role: discord.Role):
+    async def guardsman_role_add(self, interaction: Interaction, member: Member, role: discord.Role):
         if role.id not in ENDLESS_RECORD_ROLE_IDS and role.id not in WIN_ROLE_IDS and role.id not in ENDLESS_FIREWALL_ROLE_IDS:
             await interaction.response.send_message("That role is not a valid Guardsman role.", ephemeral=True)
             return
@@ -42,6 +42,31 @@ class RolesCog(commands.Cog):
                 await member.add_roles(role)
                 await interaction.response.send_message(f"Added {role.mention} to {member.mention}.", ephemeral=True)
                 return
+
+
+    @app_commands.command(
+        name="guardsman_role_remove",
+        description="Remove a Guardsman role from a user."
+    )
+    @app_commands.guilds(GUILD_ID)
+    @app_commands.describe(
+        member="The member to remove the role from.",
+        role="The Guardsman role to remove."
+    )
+    @is_admin_or_staff()
+    async def guardsman_role_remove(self, interaction: Interaction, member: Member, role: discord.Role):
+        if role.id not in ENDLESS_RECORD_ROLE_IDS and role.id not in WIN_ROLE_IDS and role.id not in ENDLESS_FIREWALL_ROLE_IDS:
+            await interaction.response.send_message("That role is not a valid Guardsman role.", ephemeral=True)
+            return
+
+        member_roles = [r.id for r in member.roles]
+
+        if not role.id in member_roles:
+            await interaction.response.send_message(f"{member.mention} does not have the {role.mention} role.", ephemeral=True)
+            return
+
+        await member.remove_roles(role)
+        await interaction.response.send_message(f"Removed {role.mention} from {member.mention}.", ephemeral=True)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(RolesCog(bot))
