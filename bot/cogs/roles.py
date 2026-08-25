@@ -45,3 +45,6 @@ class RolesCog(commands.Cog):
 
         await member.remove_roles(role)
         await interaction.response.send_message(f"Removed {role.mention} from {member.mention}.", ephemeral=True)
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(RolesCog(bot))
