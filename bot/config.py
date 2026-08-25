@@ -74,6 +74,7 @@ stats_data = bot_data.get("stats_data", {})
 STATS_REVIEW_CHANNEL_ID: int = stats_data.get("stats_review_channel_id")
 ENDLESS_RECORD_ROLE_IDS: list[int] = stats_data.get("endless_record_role_ids", [])
 WIN_ROLE_IDS: list[int] = stats_data.get("win_role_ids", [])
+ENDLESS_FIREWALL_ROLE_IDS: list[int] = stats_data.get("endless_firewall_role_ids", [])
 BADGE_ROLE_IDS: dict[int, int] = {int(k): v for k, v in stats_data.get("badge_role_ids", {}).items()}
 
 # key -> (display label, unit label used in leaderboard rows)

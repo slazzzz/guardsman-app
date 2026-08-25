@@ -672,6 +672,10 @@ class StatsCog(commands.Cog):
             role = highest_held_role(member, WIN_ROLE_IDS)
             if role:
                 role_lines.append(f"Wins tier: {role.mention}")
+        if ENDLESS_FIREWALL_ROLE_IDS:
+            role = highest_held_role(member, ENDLESS_FIREWALL_ROLE_IDS)
+            if role:
+                role_lines.append(f"Endless Firewall tier: {role.mention}")
         if role_lines:
             embed.add_field(name="Division Roles", value="\n".join(role_lines), inline=False)
 
