@@ -69,7 +69,7 @@ STAFF_PING_ALLOWED_MENTIONS = discord.AllowedMentions(roles=True, users=False, e
 # each has to be its own named, optional parameter. Three covers "a couple
 # angles / before-and-after" without the command signature getting unwieldy;
 # bump this (and add matching proof_N parameters below) if that's too few.
-MAX_PROOF_ATTACHMENTS = 3
+MAX_PROOF_ATTACHMENTS = 10
 
 
 async def attachments_to_files(attachments: list[discord.Attachment]) -> list[discord.File]:
