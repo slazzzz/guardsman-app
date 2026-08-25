@@ -20,6 +20,7 @@ COGS = (
     "bot.cogs.teams",
     "bot.cogs.seasons",
     "bot.cogs.stats",
+    "bot.cogs.roles",
 )
 
 
