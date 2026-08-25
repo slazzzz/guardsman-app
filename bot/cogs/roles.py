@@ -13,7 +13,7 @@ class RolesCog(commands.Cog):
         self.bot = bot
 
     @app_commands.command(
-        name="guardsman_role_add",
+        name="guardsman_role_update",
         description="Add a Guardsman role to a user."
     )
     @app_commands.guilds(GUILD_ID)
