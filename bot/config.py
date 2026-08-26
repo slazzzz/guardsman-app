@@ -43,6 +43,7 @@ ADMIN_USERS = guild_data.get("admin_users")
 
 MEMBER_ROLES = guild_data.get("member_roles")
 STAFF_ROLES = guild_data.get("staff_roles")
+HELPER_ROLES = guild_data.get("helper_roles")
 
 EVENT_MODES = event_data.get("event_modes")
 EVENT_TYPES = event_data.get("event_types")

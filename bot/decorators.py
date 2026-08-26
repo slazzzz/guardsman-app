@@ -2,7 +2,7 @@
 
 from discord import Interaction, app_commands
 
-from bot.config import ADMIN_USERS, MEMBER_ROLES, STAFF_ROLES
+from bot.config import ADMIN_USERS, MEMBER_ROLES, STAFF_ROLES, HELPER_ROLES
 
 
 def is_staff():
@@ -11,6 +11,11 @@ def is_staff():
         return any(r in STAFF_ROLES for r in user_roles)
     return app_commands.check(predicate)
 
+def is_helper():
+    async def predicate(interaction: Interaction):
+        user_roles = [role.id for role in interaction.user.roles]
+        return any(r in HELPER_ROLES for r in user_roles)
+    return app_commands.check(predicate)
 
 def is_member():
     async def predicate(interaction: Interaction):
@@ -32,6 +37,16 @@ def is_admin_or_staff():
         return any(r in STAFF_ROLES for r in user_roles)
     return app_commands.check(predicate)
 
+def is_admin_or_staff_or_helper():
+    async def predicate(interaction: Interaction):
+        if interaction.user.id in ADMIN_USERS:
+            return True
+        user_roles = [role.id for role in interaction.user.roles]
+        if any(r in STAFF_ROLES for r in user_roles):
+            return True
+        if any(r in HELPER_ROLES for r in user_roles):
+            return True
+    return app_commands.check(predicate)
 
 def is_allowed():
     async def predicate(interaction: Interaction):
@@ -42,6 +57,8 @@ def is_allowed():
         # Check roles (staff OR regular division member)
         user_roles = [role.id for role in interaction.user.roles]
         if any(r in STAFF_ROLES for r in user_roles):
+            return True
+        if any(r in HELPER_ROLES for r in user_roles):
             return True
         if any(r in MEMBER_ROLES for r in user_roles):
             return True

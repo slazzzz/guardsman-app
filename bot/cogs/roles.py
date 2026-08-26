@@ -21,7 +21,7 @@ class RolesCog(commands.Cog):
         member="The member to add the role to.",
         role="The Guardsman role to add."
     )
-    @is_admin_or_staff()
+    @is_admin_or_staff_or_helper()
     async def guardsman_role_add(self, interaction: Interaction, member: Member, role: discord.Role):
         if role.id not in ENDLESS_RECORD_ROLE_IDS and role.id not in WIN_ROLE_IDS and role.id not in ENDLESS_FIREWALL_ROLE_IDS:
             await interaction.response.send_message("That role is not a valid Guardsman role.", ephemeral=True)
@@ -53,7 +53,7 @@ class RolesCog(commands.Cog):
         member="The member to remove the role from.",
         role="The Guardsman role to remove."
     )
-    @is_admin_or_staff()
+    @is_admin_or_staff_or_helper()
     async def guardsman_role_remove(self, interaction: Interaction, member: Member, role: discord.Role):
         if role.id not in ENDLESS_RECORD_ROLE_IDS and role.id not in WIN_ROLE_IDS and role.id not in ENDLESS_FIREWALL_ROLE_IDS:
             await interaction.response.send_message("That role is not a valid Guardsman role.", ephemeral=True)
