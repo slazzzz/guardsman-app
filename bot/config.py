@@ -96,3 +96,27 @@ STAT_TYPES: dict[str, tuple[str, str]] = {
     "modifier_wins_3star": ("Modified Run Wins (3★)", "Win"),
     "modifier_wins_4star": ("Modified Run Wins (4★)", "Win"),
 }
+
+# Stats in this dict are NOT written to player_stats directly - nobody
+# (member or staff) submits/sets them by hand. Instead the key's value is the
+# list of component stat_types that get summed together on the fly whenever
+# a total is displayed (currently just /profile and /profile_lookup - see
+# stats.py's build_profile_embed). This keeps a single derived number
+# (e.g. "Modified Run Wins (Total)") from ever drifting out of sync with its
+# star-tier breakdown, and means nobody has to add the breakdown up
+# themselves before submitting/approving it.
+#
+# Every key here must also exist in STAT_TYPES (for its display label/unit) -
+# stats.py filters these out of every command that writes a stat_type
+# (/stat_submit, /stat_add, /stat_bulk_add, /leaderboard_stats_setup, etc.)
+# so no row for one can ever be inserted into player_stats in the first
+# place. Adding a new composite stat later just means adding an entry here
+# (plus a STAT_TYPES label if it doesn't have one yet) - no schema change.
+COMPOSITE_STAT_TYPES: dict[str, list[str]] = {
+    "modifier_wins": [
+        "modifier_wins_1star",
+        "modifier_wins_2star",
+        "modifier_wins_3star",
+        "modifier_wins_4star",
+    ],
+}

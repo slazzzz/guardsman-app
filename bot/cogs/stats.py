@@ -56,6 +56,7 @@ from bot.shared import *  # noqa: F401,F403
 STAT_CHOICES = [
     app_commands.Choice(name=label, value=key)
     for key, (label, _unit) in STAT_TYPES.items()
+    if key not in COMPOSITE_STAT_TYPES
 ]
 
 # Pings whichever staff roles are configured (guild_data.staff_roles) so a new
@@ -132,7 +133,6 @@ class StatsCog(commands.Cog):
     @app_commands.describe(
         hadal_wins=f"{STAT_TYPES['hadal_wins'][0]} - leave blank if you're not submitting this one",
         endless_record=f"{STAT_TYPES['endless_record'][0]} - leave blank if you're not submitting this one",
-        modifier_wins=f"{STAT_TYPES['modifier_wins'][0]} - leave blank if you're not submitting this one",
         death_count=f"{STAT_TYPES['death_count'][0]} - leave blank if you're not submitting this one",
         heartburn_score=f"{STAT_TYPES['heartburn_score'][0]} - leave blank if you're not submitting this one",
         heartburn_wins=f"{STAT_TYPES['heartburn_wins'][0]} - leave blank if you're not submitting this one",
@@ -141,10 +141,10 @@ class StatsCog(commands.Cog):
         firewall_record=f"{STAT_TYPES['firewall_record'][0]} - leave blank if you're not submitting this one",
         robux_spent=f"{STAT_TYPES['robux_spent'][0]} - leave blank if you're not submitting this one",
         max_modifier_percentage=f"{STAT_TYPES['max_modifier_percentage'][0]} - leave blank if you're not submitting this one",
-        modifier_wins_1star=f"{STAT_TYPES['modifier_wins_1star'][0]} - 1★ runs only - leave blank if you're not submitting this one",
-        modifier_wins_2star=f"{STAT_TYPES['modifier_wins_2star'][0]} - 2★ runs only - leave blank if you're not submitting this one",
-        modifier_wins_3star=f"{STAT_TYPES['modifier_wins_3star'][0]} - 3★ runs only - leave blank if you're not submitting this one",
-        modifier_wins_4star=f"{STAT_TYPES['modifier_wins_4star'][0]} - 4★ runs only - leave blank if you're not submitting this one",
+        modifier_wins_1star=f"{STAT_TYPES['modifier_wins_1star'][0]} - 1★ runs only - leave blank if you're not submitting this one. The total is added up for you.",
+        modifier_wins_2star=f"{STAT_TYPES['modifier_wins_2star'][0]} - 2★ runs only - leave blank if you're not submitting this one. The total is added up for you.",
+        modifier_wins_3star=f"{STAT_TYPES['modifier_wins_3star'][0]} - 3★ runs only - leave blank if you're not submitting this one. The total is added up for you.",
+        modifier_wins_4star=f"{STAT_TYPES['modifier_wins_4star'][0]} - 4★ runs only - leave blank if you're not submitting this one. The total is added up for you.",
         proof="Screenshot(s) covering whichever stat(s) you filled in above",
     )
     @is_allowed()
@@ -154,7 +154,6 @@ class StatsCog(commands.Cog):
         proof: discord.Attachment,
         hadal_wins: Optional[int] = None,
         endless_record: Optional[int] = None,
-        modifier_wins: Optional[int] = None,
         death_count: Optional[int] = None,
         heartburn_score: Optional[int] = None,
         heartburn_wins: Optional[int] = None,
@@ -183,7 +182,6 @@ class StatsCog(commands.Cog):
         submitted = {
             "hadal_wins": hadal_wins,
             "endless_record": endless_record,
-            "modifier_wins": modifier_wins,
             "death_count": death_count,
             "heartburn_score": heartburn_score,
             "heartburn_wins": heartburn_wins,
@@ -327,7 +325,7 @@ class StatsCog(commands.Cog):
             await interaction.followup.send("File is empty.", ephemeral=True)
             return
 
-        valid_stat_types = ", ".join(STAT_TYPES.keys())
+        valid_stat_types = ", ".join(k for k in STAT_TYPES.keys() if k not in COMPOSITE_STAT_TYPES)
         updated = 0
         errors: list[str] = []
 
@@ -343,6 +341,12 @@ class StatsCog(commands.Cog):
                 continue
 
             stat_type = row[1].strip()
+            if stat_type in COMPOSITE_STAT_TYPES:
+                errors.append(
+                    f"Row {line_number}: '{stat_type}' is calculated automatically from "
+                    f"{', '.join(COMPOSITE_STAT_TYPES[stat_type])} - submit those instead."
+                )
+                continue
             if stat_type not in STAT_TYPES:
                 errors.append(f"Row {line_number}: unknown stat_type '{stat_type}' (valid: {valid_stat_types}).")
                 continue
@@ -645,6 +649,17 @@ class StatsCog(commands.Cog):
 
         cursor.execute("SELECT stat_type, value FROM player_stats WHERE player_id = ?", (player_id,))
         stats = dict(cursor.fetchall())
+
+        # Composite stats (e.g. modifier_wins) are never written to player_stats
+        # directly (see config.COMPOSITE_STAT_TYPES) - derive them here from
+        # whichever components the player actually has on file. This overrides
+        # any stale directly-set value a legacy row might still have, and is
+        # skipped entirely if none of the components are present yet (so an
+        # untouched composite stat doesn't show up as a misleading 0).
+        for composite_key, component_keys in COMPOSITE_STAT_TYPES.items():
+            component_values = [stats[key] for key in component_keys if key in stats]
+            if component_values:
+                stats[composite_key] = sum(component_values)
 
         cursor.execute("SELECT badge_name FROM player_badges WHERE player_id = ? ORDER BY awarded_at", (player_id,))
         badges = [row[0] for row in cursor.fetchall()]
