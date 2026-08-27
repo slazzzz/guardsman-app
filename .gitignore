@@ -5,5 +5,4 @@
 *.json
 misc/
 venv/
-review.txt
 bot_data.json
