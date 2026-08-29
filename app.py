@@ -11,7 +11,7 @@ from discord import Interaction, app_commands
 from bot.client import bot, handler, token, tree
 from bot.config import COGS, GUILD, GUILD_ID, MEMBER_ROLES
 from bot.database import conn, cursor
-from bot.tasks import reminder_loop, stat_leaderboard_loop
+from bot.tasks import drill_expiry_loop, reminder_loop, stat_leaderboard_loop
 from bot.views import restore_all_views
 
 
@@ -84,6 +84,9 @@ async def on_ready():
 
     if not stat_leaderboard_loop.is_running():
         stat_leaderboard_loop.start()
+
+    if not drill_expiry_loop.is_running():
+        drill_expiry_loop.start()
 
     print("Fetching division members...")
     try:

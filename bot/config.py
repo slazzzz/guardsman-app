@@ -162,6 +162,16 @@ DRILL_PROOF_CHANNEL_ID: Optional[int] = drill_data.get("drill_proof_channel_id")
 # are exempt (see bot.decorators.cooldown). Defaults to 15 minutes.
 DRILL_CREATE_COOLDOWN_SECONDS: float = drill_data.get("create_cooldown_seconds", 900)
 
+# How long (in hours) a drill can sit in recruiting/ready with no
+# /drill_start before bot.tasks.drill_expiry_loop nudges the host, and how
+# long after THAT with still no /drill_start before it's auto-cancelled -
+# stops a "created it, then forgot about it" drill from sitting in the
+# drills channel forever with a live Join button. Either can be set to 0 to
+# disable that stage (0 for the cancel threshold disables auto-cancel
+# entirely but keeps the nudge; 0 for both turns the whole loop off).
+DRILL_STALE_WARNING_HOURS: float = drill_data.get("stale_warning_hours", 24)
+DRILL_STALE_CANCEL_HOURS: float = drill_data.get("stale_cancel_hours", 72)
+
 # label -> (min, max) participant count. max=None means uncapped. This is
 # purely for display/defaulting a drill's roster cap - hosts can still pick
 # any explicit max_participants when creating one (e.g. a 30-player "Large"

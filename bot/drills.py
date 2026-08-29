@@ -25,6 +25,7 @@ DRILL_COLUMNS = (
     "max_participants", "status", "created_at", "start_time", "ended_at",
     "vc_channel_id", "roster_message_id", "roster_channel_id",
     "vc_mode", "vc_locked", "started_at", "proof_channel_id", "proof_message_id",
+    "stale_warned",
 )
 
 DRILL_STATUS_LABELS = {
@@ -136,6 +137,11 @@ def build_drill_embed(drill: tuple, participant_count: int) -> Embed:
     if d["proof_channel_id"] and d["proof_message_id"]:
         proof_url = f"https://discord.com/channels/{GUILD_ID}/{d['proof_channel_id']}/{d['proof_message_id']}"
         lines.append(f"**Proof:** [jump to message]({proof_url})")
+    if d["status"] in OPEN_STATUSES and d["stale_warned"]:
+        lines.append(
+            "⚠️ *This drill hasn't been started yet and will be auto-cancelled if it stays inactive "
+            "much longer - run /drill_start or /drill_cancel.*"
+        )
 
     return Embed(
         title=f"🛡️ Guardsman Drill #{d['id']} - {d['drill_name']}",

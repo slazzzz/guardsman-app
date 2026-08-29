@@ -7,11 +7,14 @@ import discord
 from discord.ext import tasks
 
 from bot.client import bot
+from bot.config import DRILL_STALE_CANCEL_HOURS, DRILL_STALE_WARNING_HOURS
 from bot.database import conn, cursor
+from bot.drills import drill_as_dict, refresh_drill_message
 from bot.leaderboard import build_stat_leaderboard_embed, build_stat_leaderboard_image
 
 REMINDER_WINDOW = timedelta(hours=1)
 STAT_LEADERBOARD_TICK_MINUTES = 5
+DRILL_EXPIRY_TICK_MINUTES = 15
 
 
 @tasks.loop(minutes=1)
@@ -169,4 +172,100 @@ async def stat_leaderboard_loop_error(error: Exception):
 
 @stat_leaderboard_loop.before_loop
 async def before_stat_leaderboard_loop():
+    await bot.wait_until_ready()
+
+
+@tasks.loop(minutes=DRILL_EXPIRY_TICK_MINUTES)
+async def drill_expiry_loop():
+    """Handles the "host creates a drill, then never runs /drill_start"
+    case: a drill that's been sitting in recruiting/ready with no
+    started_at for DRILL_STALE_WARNING_HOURS gets its host a one-time nudge
+    DM (and a warning line on the posted embed, via build_drill_embed in
+    bot/drills.py); if it's STILL not started by DRILL_STALE_CANCEL_HOURS,
+    it's auto-cancelled the same way /drill_cancel would. Either threshold
+    can be set to 0 in bot_data.json (drill_data.stale_warning_hours /
+    stale_cancel_hours) to disable that stage - see bot/config.py.
+
+    Deliberately scoped to drills that never started at all - an abandoned
+    in_progress drill (started but never /drill_end'd) is a different
+    problem with a different fix (staff should reach for /drill_force_status
+    or /drill_end directly), not something this loop touches.
+    """
+    if not DRILL_STALE_WARNING_HOURS and not DRILL_STALE_CANCEL_HOURS:
+        return
+
+    now = datetime.now()
+
+    try:
+        cursor.execute("SELECT * FROM drills WHERE status IN ('recruiting', 'ready') AND started_at IS NULL")
+        candidates = cursor.fetchall()
+    except sqlite3.Error as e:
+        print(f"drill_expiry_loop: could not query drills, skipping this tick: {e}")
+        return
+
+    for drill in candidates:
+        d = drill_as_dict(drill)
+
+        try:
+            created_at = datetime.strptime(d["created_at"], "%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            continue
+
+        age_hours = (now - created_at).total_seconds() / 3600
+
+        try:
+            if DRILL_STALE_CANCEL_HOURS and age_hours >= DRILL_STALE_CANCEL_HOURS:
+                cursor.execute(
+                    "UPDATE drills SET status = 'cancelled', ended_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (d["id"],)
+                )
+                conn.commit()
+                await refresh_drill_message(d["id"])
+
+                try:
+                    user = await bot.fetch_user(d["host_discord_id"])
+                    await user.send(
+                        f"🛡️ Your drill **{d['drill_name']}** (#{d['id']}) was auto-cancelled - it sat in "
+                        f"recruiting for {DRILL_STALE_CANCEL_HOURS:.0f}+ hours without ever being started."
+                    )
+                except (discord.Forbidden, discord.NotFound):
+                    pass
+
+                print(f"drill_expiry_loop: auto-cancelled drill {d['id']} (inactive {age_hours:.1f}h)")
+
+            elif DRILL_STALE_WARNING_HOURS and age_hours >= DRILL_STALE_WARNING_HOURS and not d["stale_warned"]:
+                cursor.execute("UPDATE drills SET stale_warned = 1 WHERE id = ?", (d["id"],))
+                conn.commit()
+                await refresh_drill_message(d["id"])
+
+                cancel_note = (
+                    f" It'll auto-cancel at {DRILL_STALE_CANCEL_HOURS:.0f}h total if nothing changes."
+                    if DRILL_STALE_CANCEL_HOURS else ""
+                )
+                try:
+                    user = await bot.fetch_user(d["host_discord_id"])
+                    await user.send(
+                        f"🛡️ Your drill **{d['drill_name']}** (#{d['id']}) hasn't been started yet - "
+                        f"run /drill_start when you're ready, or /drill_cancel if it's not happening.{cancel_note}"
+                    )
+                except (discord.Forbidden, discord.NotFound):
+                    pass
+
+                print(f"drill_expiry_loop: warned host of stale drill {d['id']} (inactive {age_hours:.1f}h)")
+        except sqlite3.Error as e:
+            # Don't let one bad drill stop the rest of this tick, or crash
+            # the loop entirely - same reasoning as reminder_loop above.
+            print(f"drill_expiry_loop: failed processing drill {d['id']}: {e}")
+            continue
+
+
+@drill_expiry_loop.error
+async def drill_expiry_loop_error(error: Exception):
+    print(f"drill_expiry_loop crashed unexpectedly, restarting it: {error}")
+    if not drill_expiry_loop.is_running():
+        drill_expiry_loop.restart()
+
+
+@drill_expiry_loop.before_loop
+async def before_drill_expiry_loop():
     await bot.wait_until_ready()

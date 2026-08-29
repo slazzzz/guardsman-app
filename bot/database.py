@@ -349,6 +349,11 @@ ensure_column("drills", "started_at", "TEXT")
 # in bot/cogs/drills.py for the full fact-checking flow these support.
 ensure_column("drills", "proof_channel_id", "INTEGER")
 ensure_column("drills", "proof_message_id", "INTEGER")
+# Whether the host has already been sent the "your drill hasn't started yet"
+# nudge (see bot.tasks.drill_expiry_loop) - stops that DM going out every
+# tick once it's been sent, while still letting the loop keep checking
+# whether the drill has since aged past DRILL_STALE_CANCEL_HOURS.
+ensure_column("drills", "stale_warned", "INTEGER DEFAULT 0")
 
 
 def get_active_season_id() -> int:
