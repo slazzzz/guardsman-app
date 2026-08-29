@@ -48,6 +48,25 @@ class DrillsCog(commands.Cog):
             await interaction.response.send_message("max_participants must be greater than 0.", ephemeral=True)
             return
 
+        # One active drill per host at a time. Doesn't touch the cooldown
+        # above - that stays in place specifically to stop the loophole this
+        # alone wouldn't cover: cancel your one active drill, then spam
+        # /drill_create again immediately. With this check, a host is only
+        # ever blocked from creating a SECOND simultaneous drill; the
+        # cooldown is what stops rapid cancel-then-recreate cycles.
+        cursor.execute(
+            "SELECT id FROM drills WHERE host_discord_id = ? AND status IN ('recruiting', 'ready', 'in_progress')",
+            (interaction.user.id,)
+        )
+        existing_drill = cursor.fetchone()
+        if existing_drill:
+            await interaction.response.send_message(
+                f"You already have an active drill (#{existing_drill[0]}) - "
+                f"/drill_end or /drill_cancel it before creating another.",
+                ephemeral=True
+            )
+            return
+
         if DRILLS_CHANNEL_ID is None:
             await interaction.response.send_message(
                 "Drills channel not configured - add drill_data.drills_channel_id to bot_data.json.", ephemeral=True
@@ -240,6 +259,7 @@ class DrillsCog(commands.Cog):
                     print(f"Could not delete VC for drill {d['id']}: {e}")
 
         await refresh_drill_message(d["id"])
+        await post_drill_completion_log(interaction.guild, d["id"], participant_count, completed_count)
 
         failed_count = participant_count - completed_count
         await interaction.response.send_message(

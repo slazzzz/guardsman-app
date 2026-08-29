@@ -11,7 +11,7 @@ import discord
 from discord import Embed
 
 from bot.client import bot
-from bot.config import GUILD_ID
+from bot.config import DRILL_LOG_CHANNEL_ID, GUILD_ID
 from bot.database import conn, cursor
 
 # drills table column order, for readable tuple-unpacking below - keep this
@@ -25,7 +25,7 @@ DRILL_COLUMNS = (
     "max_participants", "status", "created_at", "start_time", "ended_at",
     "vc_channel_id", "roster_message_id", "roster_channel_id",
     "vc_mode", "vc_locked", "started_at", "proof_channel_id", "proof_message_id",
-    "stale_warned",
+    "stale_warned", "log_channel_id", "log_message_id",
 )
 
 DRILL_STATUS_LABELS = {
@@ -186,6 +186,63 @@ async def refresh_drill_message(drill_id: int):
         await message.edit(embed=embed, view=view)
     except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
         print(f"refresh_drill_message: could not edit drill {drill_id}'s roster message: {e}")
+
+
+async def post_drill_completion_log(guild: discord.Guild, drill_id: int, participant_count: int, completed_count: int):
+    """Posts a bot-authored summary of a just-completed drill to
+    bot.config.DRILL_LOG_CHANNEL_ID (host, roster size, completed/failed
+    counts, a link to the proof message) and saves the resulting message's
+    channel_id/message_id on the drill row - same "store a pointer, not a
+    copy" pattern as roster_message_id/proof_message_id above. No-ops
+    silently if that channel isn't configured, same as
+    DRILL_VC_CATEGORY_ID/DRILL_PROOF_CHANNEL_ID being optional elsewhere.
+
+    Called once, from /drill_end (bot/cogs/drills.py) right after a drill is
+    marked completed. Deliberately doesn't get called again later if the
+    drill's record changes (e.g. a staff /drill_force_status correction) -
+    this is meant to be an immutable log of what was recorded at completion
+    time, not a live mirror of the row.
+    """
+    if not DRILL_LOG_CHANNEL_ID:
+        return
+
+    cursor.execute("SELECT * FROM drills WHERE id = ?", (drill_id,))
+    drill = cursor.fetchone()
+    if not drill:
+        return
+    d = drill_as_dict(drill)
+
+    try:
+        channel = bot.get_channel(DRILL_LOG_CHANNEL_ID) or await bot.fetch_channel(DRILL_LOG_CHANNEL_ID)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+        print(f"post_drill_completion_log: could not fetch log channel: {e}")
+        return
+
+    failed_count = participant_count - completed_count
+    lines = [
+        f"**Host:** <@{d['host_discord_id']}>",
+        f"**Size:** {d['drill_size'].capitalize()}",
+        f"**Roster:** {participant_count}",
+        f"**Completed:** {completed_count}",
+        f"**Failed:** {failed_count}",
+    ]
+    if d["proof_channel_id"] and d["proof_message_id"]:
+        proof_url = f"https://discord.com/channels/{GUILD_ID}/{d['proof_channel_id']}/{d['proof_message_id']}"
+        lines.append(f"**Proof:** [jump to message]({proof_url})")
+
+    embed = Embed(title=f"✅ Drill #{d['id']} Completed - {d['drill_name']}", description="\n".join(lines))
+
+    try:
+        message = await channel.send(embed=embed)
+    except (discord.Forbidden, discord.HTTPException) as e:
+        print(f"post_drill_completion_log: could not post to log channel: {e}")
+        return
+
+    cursor.execute(
+        "UPDATE drills SET log_channel_id = ?, log_message_id = ? WHERE id = ?",
+        (message.channel.id, message.id, drill_id)
+    )
+    conn.commit()
 
 
 def is_user_blocked_from_drill(drill_id: int, member: discord.Member) -> bool:

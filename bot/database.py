@@ -354,6 +354,15 @@ ensure_column("drills", "proof_message_id", "INTEGER")
 # tick once it's been sent, while still letting the loop keep checking
 # whether the drill has since aged past DRILL_STALE_CANCEL_HOURS.
 ensure_column("drills", "stale_warned", "INTEGER DEFAULT 0")
+# Where the bot's own completion log entry lives (bot.config.DRILL_LOG_CHANNEL_ID,
+# post_drill_completion_log() in bot/drills.py) - both NULL until a drill
+# actually completes, and NULL forever if that channel isn't configured.
+# Deliberately separate from proof_channel_id/proof_message_id above: that
+# pair points at the HOST's own screenshot message, this pair points at the
+# bot's own summary of it (counts already computed, can't be edited or
+# deleted by the host).
+ensure_column("drills", "log_channel_id", "INTEGER")
+ensure_column("drills", "log_message_id", "INTEGER")
 
 
 def get_active_season_id() -> int:

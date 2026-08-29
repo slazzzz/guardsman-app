@@ -150,12 +150,22 @@ COMPOSITE_STAT_TYPES: dict[str, list[str]] = {
 # drill_proof_channel_id is also optional, but strongly recommended - see the
 # comment above /drill_end in bot/cogs/drills.py for what it's for. If
 # omitted, /drill_end accepts a proof link from any channel.
+# drill_log_channel_id is optional too - if set, every completed drill gets
+# a bot-posted summary there (host, roster size, completed/failed counts,
+# a link to the proof message) and the resulting message's id is saved on
+# the drill row (drills.log_channel_id/log_message_id) - see
+# post_drill_completion_log() in bot/drills.py. Unlike proof_channel_id
+# (the host's own screenshot, which they could edit or delete), this is a
+# durable, staff-controlled record with the counts already computed, so
+# there's a permanent paper trail even if the host's proof post disappears
+# later.
 
 drill_data = bot_data.get("drill_data", {})
 
 DRILLS_CHANNEL_ID: int = drill_data.get("drills_channel_id")
 DRILL_VC_CATEGORY_ID: Optional[int] = drill_data.get("drill_vc_category_id")
 DRILL_PROOF_CHANNEL_ID: Optional[int] = drill_data.get("drill_proof_channel_id")
+DRILL_LOG_CHANNEL_ID: Optional[int] = drill_data.get("drill_log_channel_id")
 
 # Per-user cooldown on /drill_create, in seconds - stops one person from
 # flooding the drills channel with back-to-back posts. Staff/helpers/admins
