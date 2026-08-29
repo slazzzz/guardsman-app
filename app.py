@@ -38,7 +38,18 @@ bot.setup_hook = setup_hook
 
 @tree.error
 async def on_app_command_error(interaction: Interaction, error):
-    if isinstance(error, app_commands.errors.CheckFailure):
+    if isinstance(error, app_commands.errors.CommandOnCooldown):
+        # Checked first since CommandOnCooldown is itself a CheckFailure
+        # subclass - without this branch it'd fall into the generic
+        # "no permission" message below, which is the wrong reason.
+        retry_after = round(error.retry_after)
+        minutes, seconds = divmod(retry_after, 60)
+        wait_str = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
+        await interaction.response.send_message(
+            f"You're using that too often - try again in {wait_str}.",
+            ephemeral=True
+        )
+    elif isinstance(error, app_commands.errors.CheckFailure):
         await interaction.response.send_message(
             "You don't have permission to use this command.",
             ephemeral=True

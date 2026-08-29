@@ -136,6 +136,11 @@ drill_data = bot_data.get("drill_data", {})
 DRILLS_CHANNEL_ID: int = drill_data.get("drills_channel_id")
 DRILL_VC_CATEGORY_ID: Optional[int] = drill_data.get("drill_vc_category_id")
 
+# Per-user cooldown on /drill_create, in seconds - stops one person from
+# flooding the drills channel with back-to-back posts. Staff/helpers/admins
+# are exempt (see bot.decorators.cooldown). Defaults to 15 minutes.
+DRILL_CREATE_COOLDOWN_SECONDS: float = drill_data.get("create_cooldown_seconds", 900)
+
 # label -> (min, max) participant count. max=None means uncapped. This is
 # purely for display/defaulting a drill's roster cap - hosts can still pick
 # any explicit max_participants when creating one (e.g. a 30-player "Large"

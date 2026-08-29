@@ -41,6 +41,7 @@ class DrillsCog(commands.Cog):
         max_participants="Override the roster cap. Leave at 0 to use the size's default (uncapped for Mega).",
     )
     @is_allowed()
+    @cooldown(DRILL_CREATE_COOLDOWN_SECONDS)
     async def drill_create(self, interaction: Interaction, name: str, objective: str, size: str, max_participants: int = 0):
         if max_participants < 0:
             await interaction.response.send_message("max_participants must be greater than 0.", ephemeral=True)
