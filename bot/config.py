@@ -13,6 +13,22 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 FONT_PATH = BASE_DIR / "assets" / "font.ttf"
 FALLBACK_AVATAR_PATH = BASE_DIR / "anger.png"
 
+# Extension dotted-paths, one per cog - the single source of truth for
+# "which cogs exist". app.py's setup_hook loads all of these at startup;
+# /admin_reload_cog (bot/cogs/admin.py) offers the same list for hot-
+# reloading one without restarting the whole bot. Add new cogs here, not
+# directly in app.py, so the two never drift apart.
+COGS = (
+    "bot.cogs.events",
+    "bot.cogs.players",
+    "bot.cogs.teams",
+    "bot.cogs.seasons",
+    "bot.cogs.stats",
+    "bot.cogs.roles",
+    "bot.cogs.drills",
+    "bot.cogs.admin",
+)
+
 # Bump this each year when rolling over to a new database file - it's the only
 # place the year needs to change (db filename, event_list display, embed title).
 DB_YEAR = 2026

@@ -12,7 +12,7 @@ from discord import Embed
 
 from bot.client import bot
 from bot.config import GUILD_ID
-from bot.database import cursor
+from bot.database import conn, cursor
 
 # drills table column order, for readable tuple-unpacking below - keep this
 # in sync with the CREATE TABLE (+ ensure_column calls) in bot/database.py.
@@ -52,6 +52,23 @@ def drill_as_dict(drill: tuple) -> dict:
     """Turns a raw `SELECT * FROM drills` row into a name-keyed dict, so
     call sites don't need to remember column positions."""
     return dict(zip(DRILL_COLUMNS, drill))
+
+
+def get_or_create_player_id(discord_id: int) -> int:
+    """Returns the player row id for discord_id, creating one on the fly if
+    it doesn't exist yet - a drill roster doesn't require a linked Roblox
+    account. Mirrors DrillRosterView._get_or_create_player_id in bot/ui.py
+    (that one can't import this one without a circular import, since this
+    module is what bot/ui.py itself imports from), kept here too so staff
+    override commands like /drill_force_join (bot/cogs/drills.py) can reuse
+    the same logic instead of re-deriving it."""
+    cursor.execute("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
+    row = cursor.fetchone()
+    if row:
+        return row[0]
+    cursor.execute("INSERT INTO players (discord_id) VALUES (?)", (discord_id,))
+    conn.commit()
+    return cursor.lastrowid
 
 
 def parse_message_link(link: str) -> Optional[tuple[int, int, int]]:

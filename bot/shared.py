@@ -21,3 +21,4 @@ from bot.lookups import *         # noqa: F401,F403
 from bot.roblox import *          # noqa: F401,F403
 from bot.ui import *              # noqa: F401,F403
 from bot.verification import *    # noqa: F401,F403
+from bot.views import *           # noqa: F401,F403

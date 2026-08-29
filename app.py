@@ -9,20 +9,10 @@ import discord
 from discord import Interaction, app_commands
 
 from bot.client import bot, handler, token, tree
-from bot.config import GUILD, GUILD_ID, MEMBER_ROLES, bot_data
+from bot.config import COGS, GUILD, GUILD_ID, MEMBER_ROLES
 from bot.database import conn, cursor
 from bot.tasks import reminder_loop, stat_leaderboard_loop
-from bot.ui import BadgeSubmissionReviewView, DrillRosterView, JoinEventView, StatBatchSubmissionReviewView
-
-COGS = (
-    "bot.cogs.events",
-    "bot.cogs.players",
-    "bot.cogs.teams",
-    "bot.cogs.seasons",
-    "bot.cogs.stats",
-    "bot.cogs.roles",
-    "bot.cogs.drills",
-)
+from bot.views import restore_all_views
 
 
 async def setup_hook():
@@ -72,62 +62,28 @@ async def on_ready():
         print(f"Could not synchronize commands: {e}")
     print(f"Bot is ready: {bot.user.name}")
 
-    # Re-register the Join Event button so it keeps working after a restart.
-    # on_ready can fire more than once (e.g. after a reconnect), so guard
-    # against re-adding the same view repeatedly.
-    if not getattr(bot, "_join_view_restored", False):
-        active_event_id = bot_data.get("active_event_data", {}).get("active_event_id")
-        if active_event_id:
-            bot.add_view(JoinEventView(active_event_id))
-            print(f"Restored Join Event view for event {active_event_id} ✅")
-        bot._join_view_restored = True
+    # Re-register every persistent view (Join Event, drill rosters, stat/
+    # badge submission reviews) so their buttons keep working after a
+    # restart - see bot/views.py for what each one does. on_ready can fire
+    # more than once (e.g. after a reconnect), so guard against re-adding
+    # the same views repeatedly. To re-run this on demand without a full
+    # restart (e.g. after a hand-edited DB row), staff/admins can use
+    # /admin_restore_views instead - see bot/cogs/admin.py.
+    if not getattr(bot, "_views_restored", False):
+        restored = restore_all_views()
+        if restored["join_event"]:
+            print("Restored Join Event view ✅")
+        if restored["submission_reviews"]:
+            print(f"Restored {restored['submission_reviews']} pending submission review view(s) ✅")
+        if restored["drills"]:
+            print(f"Restored {restored['drills']} active drill roster view(s) ✅")
+        bot._views_restored = True
 
     if not reminder_loop.is_running():
         reminder_loop.start()
 
     if not stat_leaderboard_loop.is_running():
         stat_leaderboard_loop.start()
-
-    # Re-register a review view per still-pending stat/badge submission, same
-    # reason as the Join Event view above - button callbacks don't survive a
-    # restart unless the view (with its matching custom_id) is re-attached.
-    if not getattr(bot, "_stat_review_views_restored", False):
-        # COALESCE(batch_id, id) so pre-batch rows (batch_id NULL, from before
-        # this column existed) each restore as their own single-item batch
-        # instead of all getting lumped into one NULL group.
-        cursor.execute("""
-            SELECT COALESCE(batch_id, id), GROUP_CONCAT(id)
-            FROM stat_submissions
-            WHERE status = 'pending'
-            GROUP BY COALESCE(batch_id, id)
-        """)
-        stat_batches = [[int(x) for x in ids_csv.split(",")] for _batch_id, ids_csv in cursor.fetchall()]
-        for submission_ids in stat_batches:
-            bot.add_view(StatBatchSubmissionReviewView(submission_ids))
-
-        cursor.execute("SELECT id FROM badge_submissions WHERE status = 'pending'")
-        pending_badge_ids = [row[0] for row in cursor.fetchall()]
-        for submission_id in pending_badge_ids:
-            bot.add_view(BadgeSubmissionReviewView(submission_id))
-
-        restored_count = len(stat_batches) + len(pending_badge_ids)
-        if restored_count:
-            print(f"Restored {restored_count} pending submission review view(s) ✅")
-        bot._stat_review_views_restored = True
-
-    # Same reason as the Join Event view above - a drill's Join/Leave/View
-    # Roster buttons don't survive a restart unless the view (with its
-    # matching custom_id) is re-attached. Only drills still accepting
-    # participants need this; a drill that's already in_progress/completed/
-    # cancelled had its view removed from the message by refresh_drill_message().
-    if not getattr(bot, "_drill_views_restored", False):
-        cursor.execute("SELECT id FROM drills WHERE status IN ('recruiting', 'ready')")
-        active_drill_ids = [row[0] for row in cursor.fetchall()]
-        for drill_id in active_drill_ids:
-            bot.add_view(DrillRosterView(drill_id))
-        if active_drill_ids:
-            print(f"Restored {len(active_drill_ids)} active drill roster view(s) ✅")
-        bot._drill_views_restored = True
 
     print("Fetching division members...")
     try:

@@ -790,5 +790,280 @@ class DrillsCog(commands.Cog):
         )
 
 
+    ### STAFF OVERRIDES ###
+    # Everything above (drill_start/end/cancel, roster join/leave, etc.)
+    # follows the drill's normal lifecycle and normal roster rules. These
+    # don't - they're for when something's already gone wrong (bot crashed
+    # mid-command, a host fat-fingered a field, someone needs adding/removing
+    # by hand) and staff need to force the record straight rather than work
+    # around it. Staff/admin only (is_admin_or_staff), no host exception -
+    # unlike _can_manage_drill above, a host bypassing their own drill's
+    # normal rules isn't the point of these.
+
+    @app_commands.command(
+        name="drill_force_status",
+        description="[Staff] Force a drill's status directly, bypassing normal lifecycle checks.",
+    )
+    @app_commands.guilds(GUILD_ID)
+    @app_commands.choices(status=[
+        app_commands.Choice(name=label, value=value)
+        for value, label in DRILL_STATUS_LABELS.items()
+    ])
+    @app_commands.describe(
+        status="The status to force the drill into.",
+        drill_number="1-indexed, most recent first. 0 (default) = most recent drill.",
+    )
+    @is_admin_or_staff()
+    async def drill_force_status(self, interaction: Interaction, status: str, drill_number: int = 0):
+        drill = await require_drill(interaction, drill_number)
+        if drill is None:
+            return
+
+        d = drill_as_dict(drill)
+
+        cursor.execute("UPDATE drills SET status = ? WHERE id = ?", (status, d["id"]))
+        conn.commit()
+
+        await refresh_drill_message(d["id"])
+        await interaction.response.send_message(
+            f"Drill #{d['id']} force-set to **{DRILL_STATUS_LABELS.get(status, status)}** ✅\n"
+            f"-# This only changes the status field - it doesn't touch the voice channel, so "
+            f"clean that up separately (e.g. /drill_cancel or /drill_end) if the drill's actually over.",
+            ephemeral=True
+        )
+
+
+    @app_commands.command(
+        name="drill_edit",
+        description="[Staff] Edit a drill's name, objective, size, or roster cap after the fact.",
+    )
+    @app_commands.guilds(GUILD_ID)
+    @app_commands.choices(
+        size=[app_commands.Choice(name=size_name.capitalize(), value=size_name) for size_name in DRILL_SIZES]
+    )
+    @app_commands.describe(
+        name="New name. Leave blank to keep the current one.",
+        objective="New objective. Leave blank to keep the current one.",
+        size="New size tier. Leave blank to keep the current one - doesn't change max_participants by itself.",
+        max_participants="New roster cap. Leave blank to keep the current one; 0 = uncapped.",
+        drill_number="1-indexed, most recent first. 0 (default) = most recent drill.",
+    )
+    @is_admin_or_staff()
+    async def drill_edit(
+        self,
+        interaction: Interaction,
+        name: Optional[str] = None,
+        objective: Optional[str] = None,
+        size: Optional[str] = None,
+        max_participants: Optional[int] = None,
+        drill_number: int = 0,
+    ):
+        if name is None and objective is None and size is None and max_participants is None:
+            await interaction.response.send_message("Provide at least one field to change.", ephemeral=True)
+            return
+
+        if max_participants is not None and max_participants < 0:
+            await interaction.response.send_message("max_participants must be 0 or greater.", ephemeral=True)
+            return
+
+        drill = await require_drill(interaction, drill_number)
+        if drill is None:
+            return
+
+        d = drill_as_dict(drill)
+
+        updates = {}
+        if name is not None:
+            updates["drill_name"] = name
+        if objective is not None:
+            updates["objective"] = objective
+        if size is not None:
+            updates["drill_size"] = size
+        if max_participants is not None:
+            updates["max_participants"] = max_participants
+
+        set_clause = ", ".join(f"{column} = ?" for column in updates)
+        cursor.execute(f"UPDATE drills SET {set_clause} WHERE id = ?", (*updates.values(), d["id"]))
+        conn.commit()
+
+        await refresh_drill_message(d["id"])
+        changed = ", ".join(updates)
+        await interaction.response.send_message(f"Drill #{d['id']} updated ({changed}) ✅", ephemeral=True)
+
+
+    @app_commands.command(
+        name="drill_reassign_host",
+        description="[Staff] Change a drill's host (e.g. the original host left or was picked by mistake).",
+    )
+    @app_commands.guilds(GUILD_ID)
+    @app_commands.describe(drill_number="1-indexed, most recent first. 0 (default) = most recent drill.")
+    @is_admin_or_staff()
+    async def drill_reassign_host(self, interaction: Interaction, new_host: discord.Member, drill_number: int = 0):
+        drill = await require_drill(interaction, drill_number)
+        if drill is None:
+            return
+
+        d = drill_as_dict(drill)
+
+        cursor.execute("UPDATE drills SET host_discord_id = ? WHERE id = ?", (new_host.id, d["id"]))
+        conn.commit()
+
+        # The host gets a standing connect/mute/move overwrite on the VC
+        # (see sync_drill_vc_permissions in bot/drills.py) - re-syncing moves
+        # that overwrite from the old host to the new one immediately.
+        await sync_drill_vc_permissions(interaction.guild, d["id"])
+        await refresh_drill_message(d["id"])
+
+        await interaction.response.send_message(
+            f"Drill #{d['id']}'s host is now {new_host.mention} ✅", ephemeral=True
+        )
+
+
+    @app_commands.command(
+        name="drill_kick",
+        description="[Staff] Force-remove a member from a drill's roster.",
+    )
+    @app_commands.guilds(GUILD_ID)
+    @app_commands.describe(
+        member="Who to remove from the roster.",
+        drill_number="1-indexed, most recent first. 0 (default) = most recent drill.",
+    )
+    @is_admin_or_staff()
+    async def drill_kick(self, interaction: Interaction, member: discord.Member, reason: str = "", drill_number: int = 0):
+        drill = await require_drill(interaction, drill_number)
+        if drill is None:
+            return
+
+        d = drill_as_dict(drill)
+
+        cursor.execute("SELECT id FROM players WHERE discord_id = ?", (member.id,))
+        player_row = cursor.fetchone()
+
+        cursor.execute(
+            "SELECT left_at FROM drill_participants WHERE drill_id = ? AND player_id = ?",
+            (d["id"], player_row[0] if player_row else -1)
+        )
+        existing = cursor.fetchone()
+        if not player_row or not existing or existing[0] is not None:
+            await interaction.response.send_message(f"{member.mention} isn't on drill #{d['id']}'s roster.", ephemeral=True)
+            return
+
+        cursor.execute(
+            "UPDATE drill_participants SET left_at = CURRENT_TIMESTAMP WHERE drill_id = ? AND player_id = ?",
+            (d["id"], player_row[0])
+        )
+
+        # Same "ready" -> "recruiting" drop-back as the Leave button (see
+        # DrillRosterView.leave in bot/ui.py) - a spot opening up should
+        # reopen recruiting either way, regardless of who freed it. The
+        # count below already reflects the removal above, since it runs on
+        # the same uncommitted transaction.
+        if d["status"] == "ready" and (not d["max_participants"] or get_active_participant_count(d["id"]) < d["max_participants"]):
+            cursor.execute("UPDATE drills SET status = 'recruiting' WHERE id = ?", (d["id"],))
+        conn.commit()
+
+        if d["vc_channel_id"]:
+            await disconnect_members(interaction.guild, d["vc_channel_id"], {member.id})
+
+        await refresh_drill_message(d["id"])
+
+        reason_note = f" ({reason})" if reason else ""
+        await interaction.response.send_message(
+            f"Removed {member.mention} from drill #{d['id']}'s roster{reason_note} ✅", ephemeral=True
+        )
+
+
+    @app_commands.command(
+        name="drill_force_join",
+        description="[Staff] Manually add a member to a drill's roster, bypassing the roster cap and any blocks.",
+    )
+    @app_commands.guilds(GUILD_ID)
+    @app_commands.describe(
+        member="Who to add to the roster.",
+        drill_number="1-indexed, most recent first. 0 (default) = most recent drill.",
+    )
+    @is_admin_or_staff()
+    async def drill_force_join(self, interaction: Interaction, member: discord.Member, drill_number: int = 0):
+        drill = await require_drill(interaction, drill_number)
+        if drill is None:
+            return
+
+        d = drill_as_dict(drill)
+
+        player_id = get_or_create_player_id(member.id)
+
+        cursor.execute(
+            "SELECT left_at FROM drill_participants WHERE drill_id = ? AND player_id = ?",
+            (d["id"], player_id)
+        )
+        existing = cursor.fetchone()
+        if existing and existing[0] is None:
+            await interaction.response.send_message(f"{member.mention} is already on drill #{d['id']}'s roster.", ephemeral=True)
+            return
+
+        cursor.execute("""
+            INSERT INTO drill_participants (drill_id, player_id) VALUES (?, ?)
+            ON CONFLICT(drill_id, player_id) DO UPDATE SET left_at = NULL, joined_at = CURRENT_TIMESTAMP
+        """, (d["id"], player_id))
+        conn.commit()
+
+        if d["status"] == "recruiting" and d["max_participants"] and get_active_participant_count(d["id"]) >= d["max_participants"]:
+            cursor.execute("UPDATE drills SET status = 'ready' WHERE id = ?", (d["id"],))
+            conn.commit()
+
+        await refresh_drill_message(d["id"])
+        await interaction.response.send_message(
+            f"Added {member.mention} to drill #{d['id']}'s roster ✅\n"
+            f"-# This bypasses the roster cap and any block/ban, so double check they're actually meant to be in.",
+            ephemeral=True
+        )
+
+
+    @app_commands.command(
+        name="drill_relink_message",
+        description="[Staff] Re-post a drill's roster message if the original one was deleted.",
+    )
+    @app_commands.guilds(GUILD_ID)
+    @app_commands.describe(drill_number="1-indexed, most recent first. 0 (default) = most recent drill.")
+    @is_admin_or_staff()
+    async def drill_relink_message(self, interaction: Interaction, drill_number: int = 0):
+        drill = await require_drill(interaction, drill_number)
+        if drill is None:
+            return
+
+        d = drill_as_dict(drill)
+
+        if DRILLS_CHANNEL_ID is None:
+            await interaction.response.send_message(
+                "Drills channel not configured - add drill_data.drills_channel_id to bot_data.json.", ephemeral=True
+            )
+            return
+
+        drills_channel = bot.get_channel(DRILLS_CHANNEL_ID)
+        if drills_channel is None:
+            await interaction.response.send_message(
+                "Drills channel not found - check drill_data.drills_channel_id.", ephemeral=True
+            )
+            return
+
+        participant_count = get_active_participant_count(d["id"])
+        embed = build_drill_embed(drill, participant_count)
+        view = DrillRosterView(d["id"]) if d["status"] in OPEN_STATUSES else None
+
+        try:
+            message = await drills_channel.send(embed=embed, view=view)
+        except discord.Forbidden:
+            await interaction.response.send_message("I don't have permission to post in the drills channel.", ephemeral=True)
+            return
+
+        cursor.execute(
+            "UPDATE drills SET roster_message_id = ?, roster_channel_id = ? WHERE id = ?",
+            (message.id, message.channel.id, d["id"])
+        )
+        conn.commit()
+
+        await interaction.response.send_message(f"Drill #{d['id']}'s roster message has been re-posted ✅", ephemeral=True)
+
+
 async def setup(bot: commands.Bot):
     await bot.add_cog(DrillsCog(bot))
