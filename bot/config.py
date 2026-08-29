@@ -126,15 +126,20 @@ COMPOSITE_STAT_TYPES: dict[str, list[str]] = {
 # Add a "drill_data" block to bot_data.json to configure this feature, e.g.:
 #   "drill_data": {
 #       "drills_channel_id": 123456789012345678,
-#       "drill_vc_category_id": 123456789012345678
+#       "drill_vc_category_id": 123456789012345678,
+#       "drill_proof_channel_id": 123456789012345678
 #   }
 # drill_vc_category_id is optional - if omitted, /drill_start creates the
 # voice channel outside any category (still works, just less tidy).
+# drill_proof_channel_id is also optional, but strongly recommended - see the
+# comment above /drill_end in bot/cogs/drills.py for what it's for. If
+# omitted, /drill_end accepts a proof link from any channel.
 
 drill_data = bot_data.get("drill_data", {})
 
 DRILLS_CHANNEL_ID: int = drill_data.get("drills_channel_id")
 DRILL_VC_CATEGORY_ID: Optional[int] = drill_data.get("drill_vc_category_id")
+DRILL_PROOF_CHANNEL_ID: Optional[int] = drill_data.get("drill_proof_channel_id")
 
 # Per-user cooldown on /drill_create, in seconds - stops one person from
 # flooding the drills channel with back-to-back posts. Staff/helpers/admins

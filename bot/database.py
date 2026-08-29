@@ -339,6 +339,16 @@ ensure_column("drills", "vc_mode", "TEXT DEFAULT 'open'")
 # which is exactly the "stop letting people in, don't kick anyone" behavior
 # a lock is supposed to have).
 ensure_column("drills", "vc_locked", "INTEGER DEFAULT 0")
+# Set at /drill_start (when the VC is actually created) - distinct from
+# created_at (when /drill_create was run, which can be well before the drill
+# actually happens). Used by /drill_end to reject a proof message that
+# predates the drill starting - see bot/cogs/drills.py.
+ensure_column("drills", "started_at", "TEXT")
+# Where the /drill_end proof message lives - set together, both NULL until a
+# drill is actually completed with proof. See the comment above /drill_end
+# in bot/cogs/drills.py for the full fact-checking flow these support.
+ensure_column("drills", "proof_channel_id", "INTEGER")
+ensure_column("drills", "proof_message_id", "INTEGER")
 
 
 def get_active_season_id() -> int:

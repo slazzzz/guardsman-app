@@ -1,6 +1,7 @@
 ### DRILL COMMANDS ###
 
-from typing import Union
+from datetime import datetime
+from typing import Optional, Union
 
 import discord
 from discord import Embed, Interaction, app_commands
@@ -141,7 +142,10 @@ class DrillsCog(commands.Cog):
             await interaction.response.send_message("I don't have permission to create voice channels.", ephemeral=True)
             return
 
-        cursor.execute("UPDATE drills SET status = 'in_progress', vc_channel_id = ? WHERE id = ?", (vc.id, d["id"]))
+        cursor.execute(
+            "UPDATE drills SET status = 'in_progress', vc_channel_id = ?, started_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (vc.id, d["id"])
+        )
         conn.commit()
 
         # Applies whatever the host/staff already set up during recruiting
@@ -162,14 +166,37 @@ class DrillsCog(commands.Cog):
 
     @app_commands.command(
         name="drill_end",
-        description="End a drill and record how many participants completed the objective.",
+        description="End a drill, logging proof it happened and how many participants completed the objective.",
     )
     @app_commands.guilds(GUILD_ID)
     @app_commands.describe(
+        proof_message_link=(
+            "Link to your win/proof message (with screenshot(s)) - right-click it in "
+            "the proof channel and choose Copy Message Link."
+        ),
         completed_count="How many participants completed the objective. Leave at -1 to count everyone as completed.",
     )
     @is_allowed()
-    async def drill_end(self, interaction: Interaction, completed_count: int = -1, drill_number: int = 0):
+    # Fact-checking for /drill_end, modeled on how the Leader Division logs TBS
+    # wins: the host posts a result message with screenshots (and whatever
+    # else they want to include, e.g. a note on who showed up) in a dedicated
+    # channel, then links that exact message here rather than the bot just
+    # taking a host's word for a number. It's still fundamentally an honor
+    # system - nobody's verifying the screenshot actually shows a completed
+    # objective - but it forces every completed drill to leave a durable,
+    # public, timestamped paper trail that staff (or anyone) can go check
+    # after the fact, which a bare completed_count integer doesn't.
+    #
+    # _resolve_proof_message() below is what actually enforces this - see its
+    # docstring for the specific things it checks and why. Two things this
+    # DOESN'T need to duplicate from the Leader Division pattern: "who
+    # participated" doesn't need to be manually written into the proof
+    # message, since the roster is already tracked automatically via the
+    # Join/Leave buttons (drill_participants) - the proof message only needs
+    # to carry what the bot can't already see for itself (the screenshot).
+    async def drill_end(
+        self, interaction: Interaction, proof_message_link: str, completed_count: int = -1, drill_number: int = 0
+    ):
         drill = await require_drill(interaction, drill_number)
         if drill is None:
             return
@@ -192,7 +219,16 @@ class DrillsCog(commands.Cog):
             await interaction.response.send_message("completed_count can't be greater than the roster size.", ephemeral=True)
             return
 
-        cursor.execute("UPDATE drills SET status = 'completed', ended_at = CURRENT_TIMESTAMP WHERE id = ?", (d["id"],))
+        proof_message = await self._resolve_proof_message(interaction, d, proof_message_link)
+        if proof_message is None:
+            # _resolve_proof_message already sent the ephemeral explanation.
+            return
+
+        cursor.execute(
+            "UPDATE drills SET status = 'completed', ended_at = CURRENT_TIMESTAMP, "
+            "proof_channel_id = ?, proof_message_id = ? WHERE id = ?",
+            (proof_message.channel.id, proof_message.id, d["id"])
+        )
         conn.commit()
 
         if d["vc_channel_id"]:
@@ -210,9 +246,95 @@ class DrillsCog(commands.Cog):
             f"**Drill #{d['id']} complete - {d['drill_name']}**\n"
             f"Participants: {participant_count}\n"
             f"Completed: {completed_count}\n"
-            f"Failed: {failed_count}\n\n"
+            f"Failed: {failed_count}\n"
+            f"Proof: {proof_message.jump_url}\n\n"
             f"Results have been recorded ✅"
         )
+
+
+    async def _resolve_proof_message(
+        self, interaction: Interaction, d: dict, proof_message_link: str
+    ) -> Optional[discord.Message]:
+        """Fetches and validates the message a host/staff linked as proof a
+        drill's objective was completed. On any failure, sends the ephemeral
+        explanation itself and returns None - callers just need to bail out
+        when they get None back, not send their own error.
+
+        Checks, in order:
+          1. It's actually a Discord message link, for this server.
+          2. It's in the configured proof channel (bot.config.DRILL_PROOF_CHANNEL_ID)
+             - skipped entirely if that isn't configured, though setting one
+             up is what makes this whole thing worth having: a fixed,
+             predictable place staff can go audit after the fact, rather
+             than proof potentially scattered across any channel the bot can
+             read.
+          3. The message is actually fetchable (still exists, bot can see it).
+          4. It has at least one attachment - a bare text message isn't proof
+             of anything.
+          5. It was posted after the drill actually started (drills.started_at,
+             set by /drill_start) - stops an old screenshot from some earlier,
+             unrelated run being recycled as "proof" for this drill. Skipped
+             if the drill was somehow ended without ever being started.
+          6. It isn't already logged as proof on a different drill - stops
+             one screenshot backing two separate completions.
+        """
+        parsed = parse_message_link(proof_message_link)
+        if parsed is None:
+            await interaction.response.send_message(
+                "That doesn't look like a message link - right-click the proof message "
+                "and choose **Copy Message Link**, then paste the whole thing here.",
+                ephemeral=True
+            )
+            return None
+
+        link_guild_id, channel_id, message_id = parsed
+        if link_guild_id != interaction.guild.id:
+            await interaction.response.send_message("That message link is from a different server.", ephemeral=True)
+            return None
+
+        if DRILL_PROOF_CHANNEL_ID and channel_id != DRILL_PROOF_CHANNEL_ID:
+            await interaction.response.send_message(
+                f"Proof has to be posted in <#{DRILL_PROOF_CHANNEL_ID}> - post it there, then paste its link here.",
+                ephemeral=True
+            )
+            return None
+
+        try:
+            channel = interaction.guild.get_channel(channel_id) or await interaction.guild.fetch_channel(channel_id)
+            message = await channel.fetch_message(message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            await interaction.response.send_message(
+                "Couldn't find that message - double check the link and try again.", ephemeral=True
+            )
+            return None
+
+        if not message.attachments:
+            await interaction.response.send_message(
+                "That message doesn't have any screenshots attached - proof needs at least one.",
+                ephemeral=True
+            )
+            return None
+
+        if d["started_at"]:
+            started_at = datetime.strptime(d["started_at"], "%Y-%m-%d %H:%M:%S")
+            if message.created_at.replace(tzinfo=None) < started_at:
+                await interaction.response.send_message(
+                    "That message was posted before this drill started, so it can't be proof for it - "
+                    "post a fresh result message and link that one instead.",
+                    ephemeral=True
+                )
+                return None
+
+        conflicting_drill_id = find_drill_using_proof(channel_id, message_id, exclude_drill_id=d["id"])
+        if conflicting_drill_id is not None:
+            await interaction.response.send_message(
+                f"That message is already logged as proof for drill #{conflicting_drill_id} - "
+                f"each proof message can only back one drill.",
+                ephemeral=True
+            )
+            return None
+
+        return message
 
 
     @app_commands.command(

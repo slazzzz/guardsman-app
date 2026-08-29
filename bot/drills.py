@@ -4,22 +4,27 @@
 # bot/ui.py's DrillRosterView. This module is the thing both of those
 # import from, the same role bot/leaderboard.py plays for events/stats.
 
+import re
+from typing import Optional
+
 import discord
 from discord import Embed
 
 from bot.client import bot
+from bot.config import GUILD_ID
 from bot.database import cursor
 
 # drills table column order, for readable tuple-unpacking below - keep this
 # in sync with the CREATE TABLE (+ ensure_column calls) in bot/database.py.
-# vc_mode/vc_locked were added via ensure_column, which always appends new
-# columns at the end - hence they're last here too, not grouped with the
-# other vc_* columns above them.
+# vc_mode/vc_locked/started_at/proof_channel_id/proof_message_id were all
+# added via ensure_column, which always appends new columns at the end -
+# hence they're last here too, in the order they were added, not grouped
+# with the other columns they're thematically related to.
 DRILL_COLUMNS = (
     "id", "season_id", "host_discord_id", "drill_name", "drill_size", "objective",
     "max_participants", "status", "created_at", "start_time", "ended_at",
     "vc_channel_id", "roster_message_id", "roster_channel_id",
-    "vc_mode", "vc_locked",
+    "vc_mode", "vc_locked", "started_at", "proof_channel_id", "proof_message_id",
 )
 
 DRILL_STATUS_LABELS = {
@@ -35,11 +40,43 @@ DRILL_STATUS_LABELS = {
 # themselves to reject a join/leave on a drill that's moved on.
 OPEN_STATUSES = ("recruiting", "ready")
 
+# Matches a Discord "Copy Message Link" URL, e.g.
+# https://discord.com/channels/111/222/333 (also canary/ptb, and the legacy
+# discordapp.com domain) - captures (guild_id, channel_id, message_id).
+MESSAGE_LINK_RE = re.compile(
+    r"(?:https?://)?(?:ptb\.|canary\.)?discord(?:app)?\.com/channels/(\d+)/(\d+)/(\d+)"
+)
+
 
 def drill_as_dict(drill: tuple) -> dict:
     """Turns a raw `SELECT * FROM drills` row into a name-keyed dict, so
     call sites don't need to remember column positions."""
     return dict(zip(DRILL_COLUMNS, drill))
+
+
+def parse_message_link(link: str) -> Optional[tuple[int, int, int]]:
+    """Pulls (guild_id, channel_id, message_id) out of a pasted "Copy Message
+    Link" URL, or None if the text doesn't look like one. Used by /drill_end
+    to turn the proof link a host pastes in into something fetchable - see
+    the comment above /drill_end in bot/cogs/drills.py."""
+    match = MESSAGE_LINK_RE.search(link.strip())
+    if not match:
+        return None
+    guild_id, channel_id, message_id = (int(g) for g in match.groups())
+    return guild_id, channel_id, message_id
+
+
+def find_drill_using_proof(proof_channel_id: int, proof_message_id: int, exclude_drill_id: int = 0) -> Optional[int]:
+    """Whether some OTHER drill has already been completed with this exact
+    proof message - stops the same screenshot being reused to log two
+    different drills as complete. Returns that drill's id, or None if the
+    message is unused."""
+    cursor.execute(
+        "SELECT id FROM drills WHERE proof_channel_id = ? AND proof_message_id = ? AND id != ?",
+        (proof_channel_id, proof_message_id, exclude_drill_id)
+    )
+    row = cursor.fetchone()
+    return row[0] if row else None
 
 
 def get_active_participant_count(drill_id: int) -> int:
@@ -79,6 +116,9 @@ def build_drill_embed(drill: tuple, participant_count: int) -> Embed:
     if d["vc_channel_id"]:
         lines.append(f"**Voice Channel:** <#{d['vc_channel_id']}>")
     lines.append(f"**Status:** {DRILL_STATUS_LABELS.get(d['status'], d['status'])}")
+    if d["proof_channel_id"] and d["proof_message_id"]:
+        proof_url = f"https://discord.com/channels/{GUILD_ID}/{d['proof_channel_id']}/{d['proof_message_id']}"
+        lines.append(f"**Proof:** [jump to message]({proof_url})")
 
     return Embed(
         title=f"🛡️ Guardsman Drill #{d['id']} - {d['drill_name']}",
