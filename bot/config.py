@@ -3,6 +3,7 @@
 # from them. Import from here instead of re-reading bot_data.json elsewhere.
 
 from pathlib import Path
+from typing import Optional
 
 import discord
 
@@ -119,4 +120,29 @@ COMPOSITE_STAT_TYPES: dict[str, list[str]] = {
         "modifier_wins_3star",
         "modifier_wins_4star",
     ],
+}
+
+### GUARDSMAN DRILLS ###
+# Add a "drill_data" block to bot_data.json to configure this feature, e.g.:
+#   "drill_data": {
+#       "drills_channel_id": 123456789012345678,
+#       "drill_vc_category_id": 123456789012345678
+#   }
+# drill_vc_category_id is optional - if omitted, /drill_start creates the
+# voice channel outside any category (still works, just less tidy).
+
+drill_data = bot_data.get("drill_data", {})
+
+DRILLS_CHANNEL_ID: int = drill_data.get("drills_channel_id")
+DRILL_VC_CATEGORY_ID: Optional[int] = drill_data.get("drill_vc_category_id")
+
+# label -> (min, max) participant count. max=None means uncapped. This is
+# purely for display/defaulting a drill's roster cap - hosts can still pick
+# any explicit max_participants when creating one (e.g. a 30-player "Large"
+# drill instead of the default 50).
+DRILL_SIZES: dict[str, tuple[int, Optional[int]]] = {
+    "small": (4, 8),
+    "medium": (10, 20),
+    "large": (20, 50),
+    "mega": (50, None),
 }

@@ -8,6 +8,13 @@ from discord import Embed, Interaction
 
 from bot.config import ADMIN_USERS, STAFF_ROLES
 from bot.database import conn, cursor
+from bot.drills import (
+    get_active_participant_count,
+    get_active_participant_discord_ids,
+    is_user_blocked_from_drill,
+    refresh_drill_message,
+)
+from bot.leaderboard import resolve_display_names
 from bot.lookups import upsert_player_roblox_id
 from bot.roblox import get_roblox_id_from_username
 from bot.verification import VERIFICATION_TTL, clear_verification, start_verification, verify_pending
@@ -452,3 +459,121 @@ class BadgeSubmissionReviewView(discord.ui.View):
             await interaction.response.send_message("You don't have permission to review submissions.", ephemeral=True)
             return
         await interaction.response.send_modal(ReviewReasonModal(approved=False, finalize_callback=self._finalize))
+
+class DrillRosterView(discord.ui.View):
+    """Posted alongside a drill's roster embed in the drills channel.
+    custom_id is keyed on drill_id so bot.add_view() can re-attach this after
+    a restart, the same pattern as JoinEventView.
+
+    Joining/leaving a drill deliberately does NOT require a linked Roblox
+    account (unlike JoinEventView) - a drill roster is just "who's showing
+    up", so it reuses whatever player row already exists for the member
+    (every division member gets one automatically in app.py's on_ready),
+    creating one on the fly for the rare case that's missing.
+    """
+
+    def __init__(self, drill_id: int):
+        super().__init__(timeout=None)
+        self.drill_id = drill_id
+        self.join.custom_id = f"drill_join_{drill_id}"
+        self.leave.custom_id = f"drill_leave_{drill_id}"
+        self.view_roster.custom_id = f"drill_view_roster_{drill_id}"
+
+    def _get_or_create_player_id(self, discord_id: int) -> int:
+        cursor.execute("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
+        row = cursor.fetchone()
+        if row:
+            return row[0]
+        cursor.execute("INSERT INTO players (discord_id) VALUES (?)", (discord_id,))
+        conn.commit()
+        return cursor.lastrowid
+
+    @discord.ui.button(label="Join Drill", style=discord.ButtonStyle.green)
+    async def join(self, interaction: Interaction, button: discord.ui.Button):
+        cursor.execute("SELECT status, max_participants, drill_name FROM drills WHERE id = ?", (self.drill_id,))
+        drill = cursor.fetchone()
+        if not drill:
+            await interaction.response.send_message("This drill no longer exists.", ephemeral=True)
+            return
+
+        status, max_participants, drill_name = drill
+        if status not in ("recruiting", "ready"):
+            await interaction.response.send_message("This drill is no longer accepting participants.", ephemeral=True)
+            return
+
+        if is_user_blocked_from_drill(self.drill_id, interaction.user):
+            await interaction.response.send_message("You're not able to join this drill.", ephemeral=True)
+            return
+
+        player_id = self._get_or_create_player_id(interaction.user.id)
+
+        cursor.execute(
+            "SELECT left_at FROM drill_participants WHERE drill_id = ? AND player_id = ?",
+            (self.drill_id, player_id)
+        )
+        existing = cursor.fetchone()
+        if existing and existing[0] is None:
+            await interaction.response.send_message("You're already in this drill.", ephemeral=True)
+            return
+
+        if max_participants and get_active_participant_count(self.drill_id) >= max_participants:
+            await interaction.response.send_message("This drill is full.", ephemeral=True)
+            return
+
+        # Upserts rather than a plain INSERT so rejoining after an earlier
+        # Leave clears left_at instead of hitting the UNIQUE(drill_id, player_id)
+        # constraint.
+        cursor.execute("""
+            INSERT INTO drill_participants (drill_id, player_id) VALUES (?, ?)
+            ON CONFLICT(drill_id, player_id) DO UPDATE SET left_at = NULL, joined_at = CURRENT_TIMESTAMP
+        """, (self.drill_id, player_id))
+        conn.commit()
+
+        if status == "recruiting" and max_participants and get_active_participant_count(self.drill_id) >= max_participants:
+            cursor.execute("UPDATE drills SET status = 'ready' WHERE id = ?", (self.drill_id,))
+            conn.commit()
+
+        await interaction.response.send_message(f"Joined **{drill_name}** ✅", ephemeral=True)
+        await refresh_drill_message(self.drill_id)
+
+    @discord.ui.button(label="Leave Drill", style=discord.ButtonStyle.red)
+    async def leave(self, interaction: Interaction, button: discord.ui.Button):
+        cursor.execute("SELECT id FROM players WHERE discord_id = ?", (interaction.user.id,))
+        player_row = cursor.fetchone()
+
+        cursor.execute(
+            "SELECT left_at FROM drill_participants WHERE drill_id = ? AND player_id = ?",
+            (self.drill_id, player_row[0] if player_row else -1)
+        )
+        existing = cursor.fetchone()
+        if not player_row or not existing or existing[0] is not None:
+            await interaction.response.send_message("You're not in this drill.", ephemeral=True)
+            return
+
+        cursor.execute(
+            "UPDATE drill_participants SET left_at = CURRENT_TIMESTAMP WHERE drill_id = ? AND player_id = ?",
+            (self.drill_id, player_row[0])
+        )
+
+        # A "ready" drill (roster was full) drops back to "recruiting" once a
+        # spot opens up - the count below already reflects the Leave above,
+        # since it runs on the same uncommitted transaction.
+        cursor.execute("SELECT status, max_participants FROM drills WHERE id = ?", (self.drill_id,))
+        status, max_participants = cursor.fetchone()
+        if status == "ready" and (not max_participants or get_active_participant_count(self.drill_id) < max_participants):
+            cursor.execute("UPDATE drills SET status = 'recruiting' WHERE id = ?", (self.drill_id,))
+        conn.commit()
+
+        await interaction.response.send_message("Left the drill.", ephemeral=True)
+        await refresh_drill_message(self.drill_id)
+
+    @discord.ui.button(label="View Roster", style=discord.ButtonStyle.secondary)
+    async def view_roster(self, interaction: Interaction, button: discord.ui.Button):
+        discord_ids = get_active_participant_discord_ids(self.drill_id)
+        if not discord_ids:
+            await interaction.response.send_message("No one has joined yet.", ephemeral=True)
+            return
+
+        names = await resolve_display_names(interaction, discord_ids)
+        desc = "\n".join(f"{i + 1}. {names.get(uid, f'Unknown ({uid})')}" for i, uid in enumerate(discord_ids))
+        await interaction.response.send_message(embed=Embed(title="Drill Roster", description=desc), ephemeral=True)

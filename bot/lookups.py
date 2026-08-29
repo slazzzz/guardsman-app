@@ -31,6 +31,28 @@ async def require_event(interaction: Interaction, event_number: int) -> Optional
     return event
 
 
+async def require_drill(interaction: Interaction, drill_number: int) -> Optional[tuple]:
+    """Resolves a drill by its 1-indexed position (0 = most recent), same
+    convention as require_event. Sends an ephemeral error and returns None if
+    drill_number is invalid or nothing matches."""
+    if drill_number < 0:
+        await interaction.response.send_message("drill_number must be greater than 0.", ephemeral=True)
+        return None
+
+    if drill_number != 0:
+        cursor.execute("SELECT * FROM drills ORDER BY id LIMIT 1 OFFSET ?", (drill_number - 1,))
+    else:
+        cursor.execute("SELECT * FROM drills ORDER BY id DESC LIMIT 1")
+
+    drill = cursor.fetchone()
+
+    if not drill:
+        await interaction.response.send_message("Drill not found.", ephemeral=True)
+        return None
+
+    return drill
+
+
 async def require_player(interaction: Interaction, user: Member) -> Optional[tuple]:
     cursor.execute("SELECT id FROM players WHERE discord_id = ?", (user.id,))
     player = cursor.fetchone()

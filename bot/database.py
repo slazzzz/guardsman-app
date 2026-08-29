@@ -74,6 +74,119 @@ CREATE TABLE IF NOT EXISTS seasons (
 )
 """)
 
+# A Guardsman Drill's lifecycle: recruiting -> ready -> in_progress -> completed,
+# or cancelled from any state before completed. "ready" just means the roster
+# hit max_participants - it's informational for the host (shown in the
+# embed), it does NOT lock the roster; someone can still leave a "ready"
+# drill and it drops back to "recruiting" (see bot/ui.py's DrillRosterView).
+#
+# host_discord_id is stored directly (not a player_id FK) since hosting
+# doesn't require a linked Roblox account, unlike drill_participants below.
+#
+# vc_mode ('open'/'private') and vc_locked control who can actually CONNECT
+# to the drill's voice channel once it exists - see sync_drill_vc_permissions()
+# in bot/drills.py for how these combine with drill_vc_overrides and
+# drill_banned_users below into the channel's actual permission overwrites.
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS drills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    season_id INTEGER,
+    host_discord_id INTEGER,
+    drill_name TEXT,
+    drill_size TEXT,
+    objective TEXT,
+    max_participants INTEGER,
+    status TEXT DEFAULT 'recruiting',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    start_time TEXT,
+    ended_at TEXT,
+    vc_channel_id INTEGER,
+    roster_message_id INTEGER,
+    roster_channel_id INTEGER,
+
+    FOREIGN KEY(season_id) REFERENCES seasons(id)
+)
+""")
+
+# One row per (drill, player) - kept even after someone leaves (left_at gets
+# set rather than the row being deleted) so participation history survives
+# for future features (drill-count achievements, activity leaderboards) - see
+# bot/drills.py's get_active_participant_count() for how "currently on the
+# roster" is derived from this (left_at IS NULL). completed/result/points_awarded
+# are reserved for when per-participant outcome tracking is wired up (not yet -
+# /drill_end currently only records an aggregate completed_count, see
+# bot/cogs/drills.py) rather than being written today.
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS drill_participants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    drill_id INTEGER,
+    player_id INTEGER,
+    joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    left_at TEXT,
+    completed INTEGER,
+    result TEXT,
+    points_awarded INTEGER,
+
+    FOREIGN KEY(drill_id) REFERENCES drills(id),
+    FOREIGN KEY(player_id) REFERENCES players(id),
+    UNIQUE(drill_id, player_id)
+)
+""")
+
+# Per-drill voice permission overrides - a host or staff blocking/allowing a
+# specific member or role for one drill's VC. target_type distinguishes which
+# 'target_id' is (a user's discord_id or a role's id) since both are just
+# integers. These win over the drill's vc_mode default (see
+# sync_drill_vc_permissions() in bot/drills.py) but lose to a global ban
+# below - a host can admit a guest into their own private drill, but can't
+# override a division-wide ban.
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS drill_vc_overrides (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    drill_id INTEGER,
+    target_type TEXT,
+    target_id INTEGER,
+    permission TEXT,
+    set_by INTEGER,
+    set_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY(drill_id) REFERENCES drills(id),
+    UNIQUE(drill_id, target_type, target_id)
+)
+""")
+
+# Division-wide drill VC ban list (staff-managed, /drill_ban and /drill_unban)
+# - unlike drill_vc_overrides above, this isn't scoped to one drill. Applied
+# as the last, highest-priority layer in sync_drill_vc_permissions() so it
+# can't be overridden by a host's own per-drill allow.
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS drill_banned_users (
+    discord_id INTEGER PRIMARY KEY,
+    banned_by INTEGER,
+    reason TEXT,
+    banned_at TEXT DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+# A host's own standing block/allow list (/drill_default_block etc.) - copied
+# into drill_vc_overrides for a brand new drill at /drill_create time, so a
+# host doesn't have to re-block the same troublemaker every time they run a
+# drill. It's a COPY, not a live reference: editing a drill's own overrides
+# afterward (or editing your defaults later) doesn't touch the other one -
+# each drill's overrides are independent from the moment it's created.
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS drill_host_defaults (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    host_discord_id INTEGER,
+    target_type TEXT,
+    target_id INTEGER,
+    permission TEXT,
+    set_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    UNIQUE(host_discord_id, target_type, target_id)
+)
+""")
+
 # One row per (player, stat_type) - this is the *verified*, display-ready
 # value shown on profiles/leaderboards. source distinguishes how it got here
 # ('manual' = approved from a submission, 'admin' = trusted-admin direct add,
@@ -216,6 +329,16 @@ ensure_column("stat_leaderboards", "enabled", "INTEGER DEFAULT 1")
 # avatar fetches + a Pillow render every tick) instead of the default text
 # embed. Off by default since a busy board on a short interval can add up.
 ensure_column("stat_leaderboards", "use_image", "INTEGER DEFAULT 0")
+# 'open' (default - normal VC, only global bans/explicit per-drill blocks are
+# denied) or 'private' (only roster members + explicit per-drill allows can
+# connect - see sync_drill_vc_permissions() in bot/drills.py).
+ensure_column("drills", "vc_mode", "TEXT DEFAULT 'open'")
+# Independent of vc_mode - when set, denies new connections to everyone
+# except explicit per-drill 'allowed' overrides, without touching whoever's
+# already in the channel (Discord doesn't disconnect on an overwrite change,
+# which is exactly the "stop letting people in, don't kick anyone" behavior
+# a lock is supposed to have).
+ensure_column("drills", "vc_locked", "INTEGER DEFAULT 0")
 
 
 def get_active_season_id() -> int:

@@ -14,6 +14,7 @@ from bot.client import *          # noqa: F401,F403
 from bot.config import *          # noqa: F401,F403
 from bot.decorators import *      # noqa: F401,F403
 from bot.database import *        # noqa: F401,F403
+from bot.drills import *          # noqa: F401,F403
 from bot.helpers import *         # noqa: F401,F403
 from bot.leaderboard import *     # noqa: F401,F403
 from bot.lookups import *         # noqa: F401,F403

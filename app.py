@@ -12,7 +12,7 @@ from bot.client import bot, handler, token, tree
 from bot.config import GUILD, GUILD_ID, MEMBER_ROLES, bot_data
 from bot.database import conn, cursor
 from bot.tasks import reminder_loop, stat_leaderboard_loop
-from bot.ui import BadgeSubmissionReviewView, JoinEventView, StatBatchSubmissionReviewView
+from bot.ui import BadgeSubmissionReviewView, DrillRosterView, JoinEventView, StatBatchSubmissionReviewView
 
 COGS = (
     "bot.cogs.events",
@@ -21,6 +21,7 @@ COGS = (
     "bot.cogs.seasons",
     "bot.cogs.stats",
     "bot.cogs.roles",
+    "bot.cogs.drills",
 )
 
 
@@ -102,6 +103,20 @@ async def on_ready():
         if restored_count:
             print(f"Restored {restored_count} pending submission review view(s) ✅")
         bot._stat_review_views_restored = True
+
+    # Same reason as the Join Event view above - a drill's Join/Leave/View
+    # Roster buttons don't survive a restart unless the view (with its
+    # matching custom_id) is re-attached. Only drills still accepting
+    # participants need this; a drill that's already in_progress/completed/
+    # cancelled had its view removed from the message by refresh_drill_message().
+    if not getattr(bot, "_drill_views_restored", False):
+        cursor.execute("SELECT id FROM drills WHERE status IN ('recruiting', 'ready')")
+        active_drill_ids = [row[0] for row in cursor.fetchall()]
+        for drill_id in active_drill_ids:
+            bot.add_view(DrillRosterView(drill_id))
+        if active_drill_ids:
+            print(f"Restored {len(active_drill_ids)} active drill roster view(s) ✅")
+        bot._drill_views_restored = True
 
     print("Fetching division members...")
     try:
