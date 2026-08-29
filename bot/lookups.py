@@ -53,6 +53,26 @@ async def require_drill(interaction: Interaction, drill_number: int) -> Optional
     return drill
 
 
+async def require_active_drill(interaction: Interaction) -> Optional[tuple]:
+    """Resolves the calling host's own active drill (recruiting, ready, or
+    in_progress) - the read-side counterpart to drill_create's "one active
+    drill per host" rule. Since a host can only ever have one active drill
+    at a time, there's no ambiguity to disambiguate with an index the way
+    require_event/require_drill need for staff-facing lookups. Sends an
+    ephemeral error and returns None if the caller has no active drill."""
+    cursor.execute(
+        "SELECT * FROM drills WHERE host_discord_id = ? AND status IN ('recruiting', 'ready', 'in_progress')",
+        (interaction.user.id,)
+    )
+    drill = cursor.fetchone()
+
+    if not drill:
+        await interaction.response.send_message("You don't have an active drill right now.", ephemeral=True)
+        return None
+
+    return drill
+
+
 async def require_player(interaction: Interaction, user: Member) -> Optional[tuple]:
     cursor.execute("SELECT id FROM players WHERE discord_id = ?", (user.id,))
     player = cursor.fetchone()

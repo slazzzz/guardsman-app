@@ -4,7 +4,7 @@ import time
 
 from discord import Interaction, app_commands
 
-from bot.config import ADMIN_USERS, MEMBER_ROLES, STAFF_ROLES, HELPER_ROLES
+from bot.config import ADMIN_USERS, MEMBER_ROLES, STAFF_ROLES, HELPER_ROLES, HOST_ROLES
 
 
 def is_staff():
@@ -25,6 +25,11 @@ def is_member():
         return any(r in MEMBER_ROLES for r in user_roles)
     return app_commands.check(predicate)
 
+def is_host():
+    async def predicate(interaction: Interaction):
+        user_roles = [role.id for role in interaction.user.roles]
+        return any(r in HOST_ROLES for r in user_roles)
+    return app_commands.check(predicate)
 
 def is_admin():
     async def predicate(interaction: Interaction):

@@ -10,19 +10,6 @@ from discord.ext import commands
 from bot.shared import *  # noqa: F401,F403
 
 
-def _can_manage_drill(interaction: Interaction, host_discord_id: int) -> bool:
-    """A drill can be managed by its host, or by anyone staff/admin/helper -
-    same tiers as is_admin_or_staff_or_helper(), plus the host themselves.
-    Not a decorator since drill_start/end/cancel need to know the specific
-    drill's host before they can decide, which a decorator can't see."""
-    if interaction.user.id == host_discord_id:
-        return True
-    if interaction.user.id in ADMIN_USERS:
-        return True
-    user_roles = [role.id for role in interaction.user.roles]
-    return any(r in STAFF_ROLES for r in user_roles) or any(r in HELPER_ROLES for r in user_roles)
-
-
 class DrillsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -41,7 +28,7 @@ class DrillsCog(commands.Cog):
         size="Drill size tier - sets the default roster cap.",
         max_participants="Override the roster cap. Leave at 0 to use the size's default (uncapped for Mega).",
     )
-    @is_allowed()
+    @is_host()
     @cooldown(DRILL_CREATE_COOLDOWN_SECONDS)
     async def drill_create(self, interaction: Interaction, name: str, objective: str, size: str, max_participants: int = 0):
         if max_participants < 0:
@@ -132,17 +119,13 @@ class DrillsCog(commands.Cog):
         description="Start a drill: creates a voice channel and marks it in progress.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
-    async def drill_start(self, interaction: Interaction, drill_number: int = 0):
-        drill = await require_drill(interaction, drill_number)
+    @is_host()
+    async def drill_start(self, interaction: Interaction):
+        drill = await require_active_drill(interaction)
         if drill is None:
             return
 
         d = drill_as_dict(drill)
-
-        if not _can_manage_drill(interaction, d["host_discord_id"]):
-            await interaction.response.send_message("Only the host or staff can start this drill.", ephemeral=True)
-            return
 
         if d["status"] not in ("recruiting", "ready"):
             await interaction.response.send_message(f"This drill is already {d['status']}.", ephemeral=True)
@@ -195,7 +178,7 @@ class DrillsCog(commands.Cog):
         ),
         completed_count="How many participants completed the objective. Leave at -1 to count everyone as completed.",
     )
-    @is_allowed()
+    @is_host()
     # Fact-checking for /drill_end, modeled on how the Leader Division logs TBS
     # wins: the host posts a result message with screenshots (and whatever
     # else they want to include, e.g. a note on who showed up) in a dedicated
@@ -214,17 +197,13 @@ class DrillsCog(commands.Cog):
     # Join/Leave buttons (drill_participants) - the proof message only needs
     # to carry what the bot can't already see for itself (the screenshot).
     async def drill_end(
-        self, interaction: Interaction, proof_message_link: str, completed_count: int = -1, drill_number: int = 0
+        self, interaction: Interaction, proof_message_link: str, completed_count: int = -1
     ):
-        drill = await require_drill(interaction, drill_number)
+        drill = await require_active_drill(interaction)
         if drill is None:
             return
 
         d = drill_as_dict(drill)
-
-        if not _can_manage_drill(interaction, d["host_discord_id"]):
-            await interaction.response.send_message("Only the host or staff can end this drill.", ephemeral=True)
-            return
 
         if d["status"] not in ("recruiting", "ready", "in_progress"):
             await interaction.response.send_message(f"This drill is already {d['status']}.", ephemeral=True)
@@ -362,17 +341,13 @@ class DrillsCog(commands.Cog):
         description="Cancel a drill before it happens.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
-    async def drill_cancel(self, interaction: Interaction, drill_number: int = 0):
-        drill = await require_drill(interaction, drill_number)
+    @is_host()
+    async def drill_cancel(self, interaction: Interaction):
+        drill = await require_active_drill(interaction)
         if drill is None:
             return
 
         d = drill_as_dict(drill)
-
-        if not _can_manage_drill(interaction, d["host_discord_id"]):
-            await interaction.response.send_message("Only the host or staff can cancel this drill.", ephemeral=True)
-            return
 
         if d["status"] in ("completed", "cancelled"):
             await interaction.response.send_message(f"This drill is already {d['status']}.", ephemeral=True)
@@ -445,16 +420,13 @@ class DrillsCog(commands.Cog):
         app_commands.Choice(name="Open - anyone can connect", value="open"),
         app_commands.Choice(name="Private - only roster members (+ explicit allows) can connect", value="private"),
     ])
-    @is_allowed()
-    async def drill_vc_mode(self, interaction: Interaction, mode: str, drill_number: int = 0):
-        drill = await require_drill(interaction, drill_number)
+    @is_host()
+    async def drill_vc_mode(self, interaction: Interaction, mode: str):
+        drill = await require_active_drill(interaction)
         if drill is None:
             return
 
         d = drill_as_dict(drill)
-        if not _can_manage_drill(interaction, d["host_discord_id"]):
-            await interaction.response.send_message("Only the host or staff can change this drill's VC mode.", ephemeral=True)
-            return
 
         cursor.execute("UPDATE drills SET vc_mode = ? WHERE id = ?", (mode, d["id"]))
         conn.commit()
@@ -468,16 +440,13 @@ class DrillsCog(commands.Cog):
         description="Stop new people from joining a drill's voice channel, without kicking anyone already in it.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
-    async def drill_vc_lock(self, interaction: Interaction, drill_number: int = 0):
-        drill = await require_drill(interaction, drill_number)
+    @is_host()
+    async def drill_vc_lock(self, interaction: Interaction):
+        drill = await require_active_drill(interaction)
         if drill is None:
             return
 
         d = drill_as_dict(drill)
-        if not _can_manage_drill(interaction, d["host_discord_id"]):
-            await interaction.response.send_message("Only the host or staff can lock this drill's VC.", ephemeral=True)
-            return
 
         cursor.execute("UPDATE drills SET vc_locked = 1 WHERE id = ?", (d["id"],))
         conn.commit()
@@ -491,16 +460,13 @@ class DrillsCog(commands.Cog):
         description="Re-open a locked drill voice channel to new joins.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
-    async def drill_vc_unlock(self, interaction: Interaction, drill_number: int = 0):
-        drill = await require_drill(interaction, drill_number)
+    @is_host()
+    async def drill_vc_unlock(self, interaction: Interaction):
+        drill = await require_active_drill(interaction)
         if drill is None:
             return
 
         d = drill_as_dict(drill)
-        if not _can_manage_drill(interaction, d["host_discord_id"]):
-            await interaction.response.send_message("Only the host or staff can unlock this drill's VC.", ephemeral=True)
-            return
 
         cursor.execute("UPDATE drills SET vc_locked = 0 WHERE id = ?", (d["id"],))
         conn.commit()
@@ -514,16 +480,13 @@ class DrillsCog(commands.Cog):
         description="Block a member or role from this drill's voice channel (and roster).",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
-    async def drill_vc_block(self, interaction: Interaction, target: discord.Member, reason: str = "", drill_number: int = 0):
-        drill = await require_drill(interaction, drill_number)
+    @is_host()
+    async def drill_vc_block(self, interaction: Interaction, target: discord.Member, reason: str = ""):
+        drill = await require_active_drill(interaction)
         if drill is None:
             return
 
         d = drill_as_dict(drill)
-        if not _can_manage_drill(interaction, d["host_discord_id"]):
-            await interaction.response.send_message("Only the host or staff can manage this drill's VC access.", ephemeral=True)
-            return
 
         target_type = "role" if isinstance(target, discord.Role) else "user"
         cursor.execute("""
@@ -552,16 +515,13 @@ class DrillsCog(commands.Cog):
         description="Explicitly allow a member or role into this drill's voice channel.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
-    async def drill_vc_allow(self, interaction: Interaction, target: discord.Member, drill_number: int = 0):
-        drill = await require_drill(interaction, drill_number)
+    @is_host()
+    async def drill_vc_allow(self, interaction: Interaction, target: discord.Member):
+        drill = await require_active_drill(interaction)
         if drill is None:
             return
 
         d = drill_as_dict(drill)
-        if not _can_manage_drill(interaction, d["host_discord_id"]):
-            await interaction.response.send_message("Only the host or staff can manage this drill's VC access.", ephemeral=True)
-            return
 
         target_type = "role" if isinstance(target, discord.Role) else "user"
         cursor.execute("""
@@ -581,16 +541,13 @@ class DrillsCog(commands.Cog):
         description="Remove a block/allow override for a member or role on this drill.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
-    async def drill_vc_clear(self, interaction: Interaction, target: discord.Member, drill_number: int = 0):
-        drill = await require_drill(interaction, drill_number)
+    @is_host()
+    async def drill_vc_clear(self, interaction: Interaction, target: discord.Member):
+        drill = await require_active_drill(interaction)
         if drill is None:
             return
 
         d = drill_as_dict(drill)
-        if not _can_manage_drill(interaction, d["host_discord_id"]):
-            await interaction.response.send_message("Only the host or staff can manage this drill's VC access.", ephemeral=True)
-            return
 
         target_type = "role" if isinstance(target, discord.Role) else "user"
         cursor.execute(
@@ -608,9 +565,9 @@ class DrillsCog(commands.Cog):
         description="Show the current VC access rules for a drill.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
-    async def drill_vc_permissions(self, interaction: Interaction, drill_number: int = 0):
-        drill = await require_drill(interaction, drill_number)
+    @is_host()
+    async def drill_vc_permissions(self, interaction: Interaction):
+        drill = await require_active_drill(interaction)
         if drill is None:
             return
 
@@ -729,7 +686,7 @@ class DrillsCog(commands.Cog):
         description="Add a member or role to your standing block list, applied automatically to every drill you create.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
+    @is_host()
     async def drill_default_block(self, interaction: Interaction, target: discord.Member, reason: str = ""):
         target_type = "role" if isinstance(target, discord.Role) else "user"
         cursor.execute("""
@@ -751,7 +708,7 @@ class DrillsCog(commands.Cog):
         description="Add a member or role to your standing allow list, applied automatically to every drill you create.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
+    @is_host()
     async def drill_default_allow(self, interaction: Interaction, target: discord.Member):
         target_type = "role" if isinstance(target, discord.Role) else "user"
         cursor.execute("""
@@ -772,7 +729,7 @@ class DrillsCog(commands.Cog):
         description="Remove a member or role from your standing block/allow list.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
+    @is_host()
     async def drill_default_clear(self, interaction: Interaction, target: Union[discord.Member, discord.Role]):
         target_type = "role" if isinstance(target, discord.Role) else "user"
         cursor.execute(
@@ -788,7 +745,7 @@ class DrillsCog(commands.Cog):
         description="Show your own standing block/allow list for drills you host.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_allowed()
+    @is_host()
     async def drill_default_list(self, interaction: Interaction):
         cursor.execute(
             "SELECT target_type, target_id, permission FROM drill_host_defaults WHERE host_discord_id = ? ORDER BY set_at",
@@ -812,13 +769,15 @@ class DrillsCog(commands.Cog):
 
     ### STAFF OVERRIDES ###
     # Everything above (drill_start/end/cancel, roster join/leave, etc.)
-    # follows the drill's normal lifecycle and normal roster rules. These
-    # don't - they're for when something's already gone wrong (bot crashed
-    # mid-command, a host fat-fingered a field, someone needs adding/removing
-    # by hand) and staff need to force the record straight rather than work
-    # around it. Staff/admin only (is_admin_or_staff), no host exception -
-    # unlike _can_manage_drill above, a host bypassing their own drill's
-    # normal rules isn't the point of these.
+    # is host-only and always acts on the caller's own active drill (see
+    # require_active_drill in bot/lookups.py) - a host can only ever have
+    # one, so there's nothing to disambiguate. Everything below is
+    # staff/admin only (is_admin_or_staff, no host exception) and takes an
+    # explicit drill_number, since staff may need to reach a drill that
+    # isn't theirs, isn't the most recent, or has already ended - either to
+    # force the record straight after something's gone wrong (bot crashed
+    # mid-command, a host fat-fingered a field, someone needs adding/
+    # removing by hand), or to manage a drill on a host's behalf.
 
     @app_commands.command(
         name="drill_force_status",
