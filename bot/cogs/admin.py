@@ -33,6 +33,7 @@ class AdminCog(commands.Cog):
         description="[Admin] Download a snapshot of the current database file.",
     )
     @app_commands.guilds(GUILD_ID)
+    @app_commands.default_permissions(administrator=True)
     @is_admin()
     async def admin_db_backup(self, interaction: Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -66,6 +67,7 @@ class AdminCog(commands.Cog):
     @app_commands.choices(
         cog=[app_commands.Choice(name=extension.split(".")[-1], value=extension) for extension in COGS]
     )
+    @app_commands.default_permissions(administrator=True)
     @is_admin()
     async def admin_reload_cog(self, interaction: Interaction, cog: str):
         try:
@@ -88,6 +90,7 @@ class AdminCog(commands.Cog):
         description="[Admin] Force a full slash command re-sync, without restarting the bot.",
     )
     @app_commands.guilds(GUILD_ID)
+    @app_commands.default_permissions(administrator=True)
     @is_admin()
     async def admin_resync_commands(self, interaction: Interaction):
         try:
@@ -106,6 +109,7 @@ class AdminCog(commands.Cog):
         description="[Admin] Re-attach persistent button views (Join Event, drill rosters, submission reviews) on demand.",
     )
     @app_commands.guilds(GUILD_ID)
+    @app_commands.default_permissions(administrator=True)
     @is_admin()
     async def admin_restore_views(self, interaction: Interaction):
         restored = restore_all_views()
