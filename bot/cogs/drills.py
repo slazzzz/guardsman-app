@@ -373,7 +373,7 @@ class DrillsCog(commands.Cog):
         description="List Guardsman Drills.",
     )
     @app_commands.guilds(GUILD_ID)
-    @is_admin_or_staff_or_helper()
+    @is_allowed()
     async def drill_list(self, interaction: Interaction):
         cursor.execute("SELECT id, drill_name, drill_size, status, max_participants FROM drills ORDER BY id DESC")
         drills = cursor.fetchall()

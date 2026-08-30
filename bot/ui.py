@@ -6,7 +6,7 @@ from typing import Optional
 import discord
 from discord import Embed, Interaction
 
-from bot.config import ADMIN_USERS, STAFF_ROLES
+from bot.config import ADMIN_USERS, LEADERBOARD_CATEGORIES, STAFF_ROLES
 from bot.database import conn, cursor
 from bot.drills import (
     get_active_participant_count,
@@ -14,7 +14,7 @@ from bot.drills import (
     is_user_blocked_from_drill,
     refresh_drill_message,
 )
-from bot.leaderboard import resolve_display_names
+from bot.leaderboard import build_stat_leaderboard_embed, resolve_display_names
 from bot.lookups import upsert_player_roblox_id
 from bot.roblox import get_roblox_id_from_username
 from bot.verification import VERIFICATION_TTL, clear_verification, start_verification, verify_pending
@@ -243,6 +243,95 @@ class PaginatorView(discord.ui.View):
         self.index += 1
         self._update_buttons()
         await interaction.response.edit_message(embed=self.embeds[self.index], view=self)
+
+
+class LeaderboardBrowserView(discord.ui.View):
+    """Lets a member browse leaderboards without re-running a slash command
+    for each one - a row of buttons picks a broad category (Player Stats,
+    Drill Hosting - see config.LEADERBOARD_CATEGORIES), and a dropdown below
+    it picks a specific leaderboard within whichever category is active.
+    Both re-render the message in place via build_stat_leaderboard_embed()
+    (bot/leaderboard.py) - the same function behind the auto-updating
+    channel boards and /leaderboard_stats_image - so a browsed board and a
+    posted one never look different.
+
+    Not persistent (no custom_id, not registered in restore_all_views like
+    DrillRosterView etc.) - this is a disposable browsing session tied to
+    one /leaderboard invocation, not a long-lived control surface, so it's
+    fine for it to go quietly unresponsive after `timeout` and need a fresh
+    /leaderboard run.
+    """
+
+    def __init__(self, guild: discord.Guild, author_id: int, timeout: float = 300):
+        super().__init__(timeout=timeout)
+        self.guild = guild
+        self.author_id = author_id
+        self.category = next(iter(LEADERBOARD_CATEGORIES))
+        self.selected_type: str = ""
+        self.select: discord.ui.Select = None
+        self._rebuild_category_buttons()
+        self._rebuild_select()
+
+    async def interaction_check(self, interaction: Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("This menu isn't for you - run /leaderboard yourself.", ephemeral=True)
+            return False
+        return True
+
+    def _rebuild_category_buttons(self):
+        # Re-added (not just relabeled) every time the active category
+        # changes, so each button's disabled state - used here to show which
+        # category is currently selected - stays in sync without a separate
+        # lookup at render time.
+        for item in list(self.children):
+            if isinstance(item, discord.ui.Button):
+                self.remove_item(item)
+
+        for key, (label, _types) in LEADERBOARD_CATEGORIES.items():
+            button = discord.ui.Button(
+                label=label,
+                style=discord.ButtonStyle.primary if key == self.category else discord.ButtonStyle.secondary,
+                disabled=(key == self.category),
+                row=0,
+            )
+            button.callback = self._make_category_callback(key)
+            self.add_item(button)
+
+    def _make_category_callback(self, category_key: str):
+        async def callback(interaction: Interaction):
+            self.category = category_key
+            self._rebuild_category_buttons()
+            self._rebuild_select()
+            embed = await build_stat_leaderboard_embed(self.guild, self.selected_type)
+            await interaction.response.edit_message(embed=embed, view=self)
+        return callback
+
+    def _rebuild_select(self):
+        for item in list(self.children):
+            if isinstance(item, discord.ui.Select):
+                self.remove_item(item)
+
+        _label, leaderboard_types = LEADERBOARD_CATEGORIES[self.category]
+        self.selected_type = next(iter(leaderboard_types))
+
+        select = discord.ui.Select(
+            placeholder="Choose a leaderboard...",
+            options=[
+                discord.SelectOption(label=stat_label, value=key, default=(key == self.selected_type))
+                for key, (stat_label, _unit) in leaderboard_types.items()
+            ],
+            row=1,
+        )
+        select.callback = self._select_callback
+        self.select = select
+        self.add_item(select)
+
+    async def _select_callback(self, interaction: Interaction):
+        self.selected_type = self.select.values[0]
+        for option in self.select.options:
+            option.default = (option.value == self.selected_type)
+        embed = await build_stat_leaderboard_embed(self.guild, self.selected_type)
+        await interaction.response.edit_message(embed=embed, view=self)
 
 
 class ReviewReasonModal(discord.ui.Modal):

@@ -23,24 +23,35 @@
 #   profile yet. Needed because those roles are granted manually and can go
 #   stale between when someone gets the role and when they run /badge_submit.
 # /badge_remove -> trusted-admin direct write, same as /stat_add.
-# /profile -> shows the CALLER's own verified stats, badges, and highest
-#   endless-record/win role. Always self - no `user` parameter - so anyone can
-#   run it. /profile_lookup is the staff-only equivalent for checking someone
-#   else's; both render off the same build_profile_embed() so they can't drift.
-#   Those roles are granted manually by staff via ticket for specific win/
-#   endless thresholds, entirely outside this bot - nothing here computes,
-#   assigns, or revokes them; this only reads whichever role the member
-#   already holds and displays it.
-# /leaderboard_stats_setup -> registers a channel + interval for a stat_type
-#   so tasks.py's stat_leaderboard_loop keeps it updated automatically.
-#   use_image=True switches that board to a rendered PNG instead of a text
-#   embed (heavier per tick - Roblox avatar fetches + a Pillow render - so
-#   it's opt-in). Re-running setup on a disabled board re-enables it.
+# /profile -> shows the CALLER's own verified stats, badges, highest
+#   endless-record/win role, and - only if they hold a HOST_ROLES role - a
+#   Drill Hosting section (drills hosted, completion rate, participants
+#   mobilized; see get_host_stats() in bot/drills.py). Always self - no
+#   `user` parameter - so anyone can run it. /profile_lookup is the
+#   staff-only equivalent for checking someone else's; both render off the
+#   same build_profile_embed() so they can't drift. Win/endless-record roles
+#   are granted manually by staff via ticket for specific thresholds,
+#   entirely outside this bot - nothing here computes, assigns, or revokes
+#   them; this only reads whichever role the member already holds.
+# /leaderboard -> member-facing browser (LeaderboardBrowserView, bot/ui.py) -
+#   category buttons (Player Stats / Drill Hosting - config.LEADERBOARD_CATEGORIES)
+#   switch which dropdown of specific leaderboards is shown, picking a
+#   dropdown entry re-renders the embed in place. Nothing here is persisted;
+#   it's a disposable browsing session (5 min timeout), not an auto-updating
+#   board - use /leaderboard_stats_setup for that.
+# /leaderboard_stats_setup -> registers a channel + interval for a stat OR
+#   drill hosting category (LEADERBOARD_CHOICES = STAT_CHOICES +
+#   DRILL_LEADERBOARD_TYPES) so tasks.py's stat_leaderboard_loop keeps it
+#   updated automatically. use_image=True switches that board to a rendered
+#   PNG instead of a text embed (heavier per tick - Roblox avatar fetches +
+#   a Pillow render - so it's opt-in). Re-running setup on a disabled board
+#   re-enables it.
 # /leaderboard_stats_disable, /leaderboard_stats_enable -> pause/resume a
 #   board's auto-updates (staff). Deleting the posted message by hand does
 #   NOT stop the loop - it just posts a fresh one next tick - disable is the
 #   actual off switch.
-# /leaderboard_stats_image -> on-demand PNG version of any stat leaderboard.
+# /leaderboard_stats_image -> on-demand PNG version of any stat or drill
+#   hosting leaderboard.
 
 import csv
 from io import StringIO
@@ -57,6 +68,18 @@ STAT_CHOICES = [
     app_commands.Choice(name=label, value=key)
     for key, (label, _unit) in STAT_TYPES.items()
     if key not in COMPOSITE_STAT_TYPES
+]
+
+# Same as STAT_CHOICES, plus DRILL_LEADERBOARD_TYPES (drills_hosted etc.) -
+# used only by the /leaderboard_stats_* commands below, which render through
+# build_stat_leaderboard_embed/image (bot/leaderboard.py, now dispatches to
+# either source - see leaderboard_type_label() there). NOT used by
+# /stat_add or /stat_bulk_add - those write directly to player_stats, and a
+# drill-hosting figure isn't a thing anyone sets by hand, it's always
+# computed live from the drills tables.
+LEADERBOARD_CHOICES = STAT_CHOICES + [
+    app_commands.Choice(name=label, value=key)
+    for key, (label, _unit) in DRILL_LEADERBOARD_TYPES.items()
 ]
 
 # Pings whichever staff roles are configured (guild_data.staff_roles) so a new
@@ -640,7 +663,16 @@ class StatsCog(commands.Cog):
         """Builds the profile embed for `member`, or None if they have no
         player row yet. Shared by /profile (self-only) and /profile_lookup
         (staff-only, any member) so the two can't drift apart - is_self only
-        changes the footer wording for the no-Roblox-linked case."""
+        changes the footer wording for the no-Roblox-linked case.
+
+        Layout, top to bottom: Stats (two side-by-side inline columns rather
+        than one long stacked list), Mastery Tiers, Badges, then - only if
+        `member` currently holds a HOST_ROLES role - a Drill Hosting section
+        (see get_host_stats() in bot/drills.py). That last gating is
+        deliberate: hosting is role-limited, so showing hosting stats to
+        someone who was never a host (and so only ever has zeros) would just
+        be clutter, not useful information.
+        """
         cursor.execute("SELECT id, roblox_id FROM players WHERE discord_id = ?", (member.id,))
         player = cursor.fetchone()
         if not player:
@@ -661,22 +693,34 @@ class StatsCog(commands.Cog):
             if component_values:
                 stats[composite_key] = sum(component_values)
 
+        # Once a composite total is shown, its individual star-tier components
+        # would just be repeating the same numbers underneath it - hide them
+        # from the flat list below so the profile doesn't get any more
+        # crowded than it needs to be. (A component with no composite parent
+        # - there isn't one today, but nothing stops it in principle - would
+        # simply not be in this set and would still show normally.)
+        composite_component_keys = {key for keys in COMPOSITE_STAT_TYPES.values() for key in keys}
+
         cursor.execute("SELECT badge_name FROM player_badges WHERE player_id = ? ORDER BY awarded_at", (player_id,))
         badges = [row[0] for row in cursor.fetchall()]
 
         embed = Embed(title=f"{member.display_name}'s Pressure Profile", color=discord.Color.dark_gold())
 
-        if stats:
-            embed.add_field(
-                name="Stats",
-                value="\n".join(f"**{STAT_TYPES[key][0]}:** {value:,}" for key, value in stats.items() if key in STAT_TYPES),
-                inline=False
-            )
+        stat_lines = [
+            f"**{STAT_TYPES[key][0]}:** {value:,}"
+            for key, value in stats.items()
+            if key in STAT_TYPES and key not in composite_component_keys
+        ]
+        if stat_lines:
+            # Two inline fields side by side reads as a grid instead of one
+            # long vertical stack - split as evenly as possible, left column
+            # gets the extra line on an odd count.
+            midpoint = (len(stat_lines) + 1) // 2
+            embed.add_field(name="📊 Stats", value="\n".join(stat_lines[:midpoint]), inline=True)
+            if stat_lines[midpoint:]:
+                embed.add_field(name="\u200b", value="\n".join(stat_lines[midpoint:]), inline=True)
         else:
-            embed.add_field(name="Stats", value="No verified stats yet - `/stat_submit` to add one!", inline=False)
-
-        if badges:
-            embed.add_field(name="Badges", value=" • ".join(badges), inline=False)
+            embed.add_field(name="📊 Stats", value="No verified stats yet - `/stat_submit` to add one!", inline=False)
 
         role_lines = []
         if ENDLESS_RECORD_ROLE_IDS:
@@ -692,7 +736,31 @@ class StatsCog(commands.Cog):
             if role:
                 role_lines.append(f"Endless Firewall tier: {role.mention}")
         if role_lines:
-            embed.add_field(name="Division Roles", value="\n".join(role_lines), inline=False)
+            embed.add_field(name="🎖️ Mastery Tiers", value="\n".join(role_lines), inline=False)
+
+        if badges:
+            MAX_BADGES_SHOWN = 15
+            badge_text = " • ".join(badges[:MAX_BADGES_SHOWN])
+            if len(badges) > MAX_BADGES_SHOWN:
+                badge_text += f" • *+{len(badges) - MAX_BADGES_SHOWN} more*"
+            embed.add_field(name=f"🏅 Badges ({len(badges)})", value=badge_text, inline=False)
+
+        if HOST_ROLES and any(role.id in HOST_ROLES for role in member.roles):
+            host_stats = get_host_stats(member.id)
+            completion_rate = (
+                f"{host_stats['completion_rate']}%" if host_stats["completion_rate"] is not None else "—"
+            )
+            embed.add_field(
+                name="🛡️ Drill Hosting",
+                value=(
+                    f"**Drills Hosted:** {host_stats['hosted']:,}\n"
+                    f"**Completed:** {host_stats['completed']:,} ✅ · **Cancelled:** {host_stats['cancelled']:,} ❌\n"
+                    f"**Participants Mobilized:** {host_stats['participants_mobilized']:,}\n"
+                    f"**Avg per Drill:** {host_stats['average_participation']:,}\n"
+                    f"**Completion Rate:** {completion_rate}"
+                ),
+                inline=False,
+            )
 
         if roblox_id:
             avatar_url = get_avatar_url(roblox_id)
@@ -727,9 +795,18 @@ class StatsCog(commands.Cog):
 
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="leaderboard_stats_setup", description="Set an auto-updating leaderboard channel for a stat (staff)")
+    @app_commands.command(name="leaderboard", description="Browse leaderboards - stats and drill hosting - with buttons and a dropdown")
     @app_commands.guilds(GUILD_ID)
-    @app_commands.choices(stat_type=STAT_CHOICES)
+    @is_allowed()
+    async def leaderboard_browser(self, interaction: Interaction):
+        await interaction.response.defer()
+        view = LeaderboardBrowserView(interaction.guild, interaction.user.id)
+        embed = await build_stat_leaderboard_embed(interaction.guild, view.selected_type)
+        await interaction.followup.send(embed=embed, view=view)
+
+    @app_commands.command(name="leaderboard_stats_setup", description="Set an auto-updating leaderboard channel for a stat or drill hosting category (staff)")
+    @app_commands.guilds(GUILD_ID)
+    @app_commands.choices(stat_type=LEADERBOARD_CHOICES)
     @app_commands.describe(
         use_image="Post a rendered image instead of a text embed - heavier to generate every tick, so opt in deliberately"
     )
@@ -783,7 +860,7 @@ class StatsCog(commands.Cog):
         description="Stop an auto-updating leaderboard from refreshing (staff). Deleting its message alone won't stop it.",
     )
     @app_commands.guilds(GUILD_ID)
-    @app_commands.choices(stat_type=STAT_CHOICES)
+    @app_commands.choices(stat_type=LEADERBOARD_CHOICES)
     @is_admin_or_staff()
     async def leaderboard_stats_disable(self, interaction: Interaction, stat_type: app_commands.Choice[str]):
         cursor.execute("SELECT enabled FROM stat_leaderboards WHERE stat_type = ?", (stat_type.value,))
@@ -809,7 +886,7 @@ class StatsCog(commands.Cog):
         description="Resume an auto-updating leaderboard previously stopped with /leaderboard_stats_disable (staff)",
     )
     @app_commands.guilds(GUILD_ID)
-    @app_commands.choices(stat_type=STAT_CHOICES)
+    @app_commands.choices(stat_type=LEADERBOARD_CHOICES)
     @is_admin_or_staff()
     async def leaderboard_stats_enable(self, interaction: Interaction, stat_type: app_commands.Choice[str]):
         cursor.execute("SELECT enabled, channel_id FROM stat_leaderboards WHERE stat_type = ?", (stat_type.value,))
@@ -827,9 +904,9 @@ class StatsCog(commands.Cog):
         channel_mention = f"<#{row[1]}>"
         await interaction.response.send_message(f"**{stat_type.name}** will resume auto-updating in {channel_mention}.", ephemeral=True)
 
-    @app_commands.command(name="leaderboard_stats_image", description="Render a stat leaderboard as an image, on demand")
+    @app_commands.command(name="leaderboard_stats_image", description="Render a stat or drill hosting leaderboard as an image, on demand")
     @app_commands.guilds(GUILD_ID)
-    @app_commands.choices(stat_type=STAT_CHOICES)
+    @app_commands.choices(stat_type=LEADERBOARD_CHOICES)
     @is_admin_or_staff()
     async def leaderboard_stats_image(self, interaction: Interaction, stat_type: app_commands.Choice[str]):
         await interaction.response.defer()

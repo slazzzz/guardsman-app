@@ -10,7 +10,14 @@ from discord import Embed, Interaction
 from PIL import Image, ImageDraw, ImageFont
 
 from bot.client import bot
-from bot.config import DEFAULT_PLACEMENT_COLOR, FALLBACK_AVATAR_PATH, FONT_PATH, PLACEMENT_COLORS, STAT_TYPES
+from bot.config import (
+    DEFAULT_PLACEMENT_COLOR,
+    DRILL_LEADERBOARD_TYPES,
+    FALLBACK_AVATAR_PATH,
+    FONT_PATH,
+    PLACEMENT_COLORS,
+    STAT_TYPES,
+)
 from bot.database import cursor
 from bot.helpers import placement_line
 from bot.roblox import get_avatar_urls_batch
@@ -265,6 +272,75 @@ def get_stat_leaderboard_rows(stat_type: str, limit: int = 10) -> list[tuple[int
     return cursor.fetchall()
 
 
+### DRILL HOSTING LEADERBOARDS ###
+# Same (discord_id, value, roblox_id) row shape as get_stat_leaderboard_rows()
+# above, but aggregated live from the drills/drill_participants tables
+# instead of read from player_stats - see config.DRILL_LEADERBOARD_TYPES for
+# the categories this covers, and get_host_stats() in bot/drills.py for the
+# equivalent per-host figures shown on /guardsman_profile.
+
+def get_drill_leaderboard_rows(leaderboard_type: str, limit: int = 10) -> list[tuple[int, int, int]]:
+    """Top `limit` hosts for a drill-derived leaderboard category. roblox_id
+    is looked up via a LEFT JOIN since hosting a drill never requires a
+    linked Roblox account (unlike drill_participants below, drills.host_discord_id
+    isn't a player_id FK) - an unlinked host still shows up, just with the
+    fallback avatar, same as an unlinked player anywhere else."""
+    if leaderboard_type == "drills_hosted":
+        cursor.execute("""
+            SELECT d.host_discord_id, COUNT(*), COALESCE(p.roblox_id, 0)
+            FROM drills d
+            LEFT JOIN players p ON p.discord_id = d.host_discord_id
+            GROUP BY d.host_discord_id
+            ORDER BY 2 DESC
+            LIMIT ?
+        """, (limit,))
+    elif leaderboard_type == "drills_completed":
+        cursor.execute("""
+            SELECT d.host_discord_id, COUNT(*), COALESCE(p.roblox_id, 0)
+            FROM drills d
+            LEFT JOIN players p ON p.discord_id = d.host_discord_id
+            WHERE d.status = 'completed'
+            GROUP BY d.host_discord_id
+            ORDER BY 2 DESC
+            LIMIT ?
+        """, (limit,))
+    elif leaderboard_type == "participants_mobilized":
+        cursor.execute("""
+            SELECT d.host_discord_id, COUNT(*), COALESCE(p.roblox_id, 0)
+            FROM drill_participants dp
+            JOIN drills d ON d.id = dp.drill_id
+            LEFT JOIN players p ON p.discord_id = d.host_discord_id
+            GROUP BY d.host_discord_id
+            ORDER BY 2 DESC
+            LIMIT ?
+        """, (limit,))
+    else:
+        return []
+    return cursor.fetchall()
+
+
+def leaderboard_type_label(leaderboard_type: str) -> Optional[tuple[str, str]]:
+    """Resolves a leaderboard key to its (label, unit), checking STAT_TYPES
+    then DRILL_LEADERBOARD_TYPES - the single lookup every rendering
+    function below goes through, so a new category only needs adding to one
+    of those two dicts, never taught to each call site separately."""
+    if leaderboard_type in STAT_TYPES:
+        return STAT_TYPES[leaderboard_type]
+    if leaderboard_type in DRILL_LEADERBOARD_TYPES:
+        return DRILL_LEADERBOARD_TYPES[leaderboard_type]
+    return None
+
+
+def get_leaderboard_rows(leaderboard_type: str, limit: int = 10) -> list[tuple[int, int, int]]:
+    """Same dispatch as leaderboard_type_label() - routes to whichever
+    table actually backs this leaderboard key."""
+    if leaderboard_type in STAT_TYPES:
+        return get_stat_leaderboard_rows(leaderboard_type, limit)
+    if leaderboard_type in DRILL_LEADERBOARD_TYPES:
+        return get_drill_leaderboard_rows(leaderboard_type, limit)
+    return []
+
+
 async def resolve_display_names_for_guild(guild: Optional[discord.Guild], user_ids: list[int]) -> dict[int, str]:
     """Same job as resolve_display_names(), but usable from contexts with no
     Interaction (e.g. the background auto-update loop in tasks.py)."""
@@ -282,19 +358,25 @@ async def resolve_display_names_for_guild(guild: Optional[discord.Guild], user_i
     return names
 
 
-async def build_stat_leaderboard_embed(guild: Optional[discord.Guild], stat_type: str) -> Optional[Embed]:
-    """Builds the embed shown in an auto-updating leaderboard channel. Returns
-    None for an unknown stat_type so callers can report that cleanly."""
-    if stat_type not in STAT_TYPES:
+async def build_stat_leaderboard_embed(guild: Optional[discord.Guild], leaderboard_type: str) -> Optional[Embed]:
+    """Builds the embed shown in an auto-updating leaderboard channel, on
+    /leaderboard_stats_image, and by the /leaderboard browser (bot/ui.py's
+    LeaderboardBrowserView). leaderboard_type can be any STAT_TYPES key
+    (player_stats-backed) or DRILL_LEADERBOARD_TYPES key (aggregated live
+    from the drills tables) - see leaderboard_type_label()/get_leaderboard_rows()
+    above for the dispatch. Returns None for an unrecognized key so callers
+    can report that cleanly."""
+    label_unit = leaderboard_type_label(leaderboard_type)
+    if label_unit is None:
         return None
+    label, unit = label_unit
 
-    label, unit = STAT_TYPES[stat_type]
-    rows = get_stat_leaderboard_rows(stat_type)
+    rows = get_leaderboard_rows(leaderboard_type)
     names = await resolve_display_names_for_guild(guild, [row[0] for row in rows])
 
     embed = Embed(title=f"🏆 {label}", color=discord.Color.gold())
     if not rows:
-        embed.description = "No verified stats yet - be the first to submit one!"
+        embed.description = "Nothing on record yet - be the first!"
         return embed
 
     embed.description = "".join(
@@ -304,16 +386,18 @@ async def build_stat_leaderboard_embed(guild: Optional[discord.Guild], stat_type
     return embed
 
 
-async def build_stat_leaderboard_image(guild: Optional[discord.Guild], stat_type: str) -> Optional[discord.File]:
-    """The on-request PNG version (e.g. from /profile or /leaderboard_stats image),
+async def build_stat_leaderboard_image(guild: Optional[discord.Guild], leaderboard_type: str) -> Optional[discord.File]:
+    """The on-request PNG version (e.g. from /profile or /leaderboard_stats_image),
     also usable from the auto-update loop for boards with use_image = 1 - see
-    stats.py and tasks.py. leaderboard_image() makes blocking Roblox API/image
-    requests, so it's run in a worker thread here (once, for every caller)
-    rather than each call site having to remember to do that itself."""
-    if stat_type not in STAT_TYPES:
+    stats.py and tasks.py. Same STAT_TYPES-or-DRILL_LEADERBOARD_TYPES dispatch
+    as build_stat_leaderboard_embed() above. leaderboard_image() makes blocking
+    Roblox API/image requests, so it's run in a worker thread here (once, for
+    every caller) rather than each call site having to remember to do that itself."""
+    label_unit = leaderboard_type_label(leaderboard_type)
+    if label_unit is None:
         return None
+    label, unit = label_unit
 
-    label, unit = STAT_TYPES[stat_type]
-    rows = get_stat_leaderboard_rows(stat_type)
+    rows = get_leaderboard_rows(leaderboard_type)
     names = await resolve_display_names_for_guild(guild, [row[0] for row in rows])
     return await asyncio.to_thread(leaderboard_image, rows, names, label, unit)

@@ -139,6 +139,36 @@ COMPOSITE_STAT_TYPES: dict[str, list[str]] = {
     ],
 }
 
+# key -> (display label, unit label) - drill-derived leaderboard categories,
+# parallel to STAT_TYPES but sourced live from the drills/drill_participants
+# tables instead of player_stats (a host's drill count isn't a row anyone
+# submits or sets - it's aggregated on the fly). See get_drill_leaderboard_rows()
+# in bot/leaderboard.py for the actual queries, and get_leaderboard_rows()/
+# leaderboard_type_label() there for how a key from either this dict or
+# STAT_TYPES gets resolved through the same rendering path (embeds, images,
+# auto-updating channel boards via /leaderboard_stats_setup, and the
+# /leaderboard browser) without those call sites needing to care which one
+# it came from.
+DRILL_LEADERBOARD_TYPES: dict[str, tuple[str, str]] = {
+    "drills_hosted": ("Drills Hosted", "Drill"),
+    "drills_completed": ("Drills Completed", "Drill"),
+    "participants_mobilized": ("Participants Mobilized", "Participant"),
+}
+
+# Powers the /leaderboard browser's category buttons (bot/ui.py's
+# LeaderboardBrowserView) - key -> (button label, {leaderboard_key: (label, unit)}).
+# Composite stats (e.g. modifier_wins) are excluded from the Player Stats
+# category the same way STAT_CHOICES excludes them in stats.py - they're
+# derived/display-only, never a standalone leaderboard. Add a new category
+# here (plus its own dict of types) and the browser picks it up automatically,
+# no changes needed in bot/ui.py itself.
+LEADERBOARD_CATEGORIES: dict[str, tuple[str, dict[str, tuple[str, str]]]] = {
+    "stats": ("📊 Player Stats", {
+        key: value for key, value in STAT_TYPES.items() if key not in COMPOSITE_STAT_TYPES
+    }),
+    "drills": ("🛡️ Drill Hosting", DRILL_LEADERBOARD_TYPES),
+}
+
 ### GUARDSMAN DRILLS ###
 # Add a "drill_data" block to bot_data.json to configure this feature, e.g.:
 #   "drill_data": {

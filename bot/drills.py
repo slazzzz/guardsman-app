@@ -115,6 +115,47 @@ def get_active_participant_discord_ids(drill_id: int) -> list[int]:
     return [row[0] for row in cursor.fetchall()]
 
 
+def get_host_stats(host_discord_id: int) -> dict:
+    """Aggregates a host's hosting record across every drill they've ever
+    created - drills hosted, how many finished (completed vs cancelled), and
+    total participants mobilized, all pulled live from drills/drill_participants
+    rather than a stored/cached figure. Used by /guardsman_profile's Drill
+    Hosting section (see build_profile_embed in bot/cogs/stats.py) and by
+    the drills_hosted/drills_completed/participants_mobilized leaderboard
+    categories (bot/leaderboard.py, config.DRILL_LEADERBOARD_TYPES).
+
+    completion_rate is out of DECIDED drills (completed + cancelled) rather
+    than every drill ever created, so a host with several drills still
+    recruiting/in_progress isn't penalized for outcomes that haven't
+    happened yet - it's None (not 0) when there's nothing decided yet, so
+    callers can render "-" instead of a misleading 0%.
+    """
+    cursor.execute(
+        "SELECT status, COUNT(*) FROM drills WHERE host_discord_id = ? GROUP BY status",
+        (host_discord_id,)
+    )
+    status_counts = dict(cursor.fetchall())
+    hosted = sum(status_counts.values())
+    completed = status_counts.get("completed", 0)
+    cancelled = status_counts.get("cancelled", 0)
+    decided = completed + cancelled
+
+    cursor.execute(
+        "SELECT COUNT(*) FROM drill_participants dp JOIN drills d ON d.id = dp.drill_id WHERE d.host_discord_id = ?",
+        (host_discord_id,)
+    )
+    participants_mobilized = cursor.fetchone()[0]
+
+    return {
+        "hosted": hosted,
+        "completed": completed,
+        "cancelled": cancelled,
+        "participants_mobilized": participants_mobilized,
+        "average_participation": round(participants_mobilized / hosted, 1) if hosted else 0.0,
+        "completion_rate": round(completed / decided * 100) if decided else None,
+    }
+
+
 def build_drill_embed(drill: tuple, participant_count: int) -> Embed:
     d = drill_as_dict(drill)
 
