@@ -51,8 +51,7 @@ class RolesCog(commands.Cog):
             # used to grant channel access on its own, so this keeps that
             # one action doing the same job it always did.
             needs_access_role = (
-                GUARDSMAN_ACCESS_ROLE
-                and GUARDSMAN_ACCESS_ROLE not in member_roles
+                GUARDSMAN_ACCESS_ROLE not in member_roles
                 and not any(r in TIER_ROLES for r in member_roles)
             )
 
