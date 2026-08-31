@@ -198,36 +198,44 @@ class DrillsCog(commands.Cog):
 
     @app_commands.command(
         name="drill_end",
-        description="End a drill, logging proof it happened and how many participants completed the objective.",
+        description="End a drill, optionally logging proof, and how many participants completed the objective.",
     )
     @app_commands.guilds(GUILD_ID)
     @app_commands.describe(
         proof_message_link=(
-            "Link to your win/proof message (with screenshot(s)) - right-click it in "
-            "the proof channel and choose Copy Message Link."
+            "Optional: link to your win/proof message (with screenshot(s)) - right-click it in "
+            "the proof channel and choose Copy Message Link. Leave blank to skip proof."
         ),
         completed_count="How many participants completed the objective. Leave at -1 to count everyone as completed.",
     )
     @is_host()
     # Fact-checking for /drill_end, modeled on how the Leader Division logs TBS
-    # wins: the host posts a result message with screenshots (and whatever
+    # wins: the host can post a result message with screenshots (and whatever
     # else they want to include, e.g. a note on who showed up) in a dedicated
-    # channel, then links that exact message here rather than the bot just
+    # channel, then link that exact message here rather than the bot just
     # taking a host's word for a number. It's still fundamentally an honor
     # system - nobody's verifying the screenshot actually shows a completed
-    # objective - but it forces every completed drill to leave a durable,
-    # public, timestamped paper trail that staff (or anyone) can go check
-    # after the fact, which a bare completed_count integer doesn't.
+    # objective - but when it's provided, it leaves a durable, public,
+    # timestamped paper trail that staff (or anyone) can go check after the
+    # fact, which a bare completed_count integer doesn't.
     #
-    # _resolve_proof_message() below is what actually enforces this - see its
-    # docstring for the specific things it checks and why. Two things this
-    # DOESN'T need to duplicate from the Leader Division pattern: "who
-    # participated" doesn't need to be manually written into the proof
-    # message, since the roster is already tracked automatically via the
-    # Join/Leave buttons (drill_participants) - the proof message only needs
-    # to carry what the bot can't already see for itself (the screenshot).
+    # proof_message_link is OPTIONAL (Aug 31, 2026 revision) - members found
+    # requiring it for every drill too tedious, so a host can now leave it
+    # blank and just report a completed_count. proof_channel_id/
+    # proof_message_id are left NULL in that case, same as /drill_force_end
+    # below - build_drill_embed and post_drill_completion_log already handle
+    # that being absent, since that path already existed for staff force-ends.
+    #
+    # _resolve_proof_message() below is what enforces the checks when a link
+    # IS provided - see its docstring for the specific things it checks and
+    # why. Two things this DOESN'T need to duplicate from the Leader Division
+    # pattern: "who participated" doesn't need to be manually written into
+    # the proof message, since the roster is already tracked automatically
+    # via the Join/Leave buttons (drill_participants) - the proof message
+    # only needs to carry what the bot can't already see for itself (the
+    # screenshot).
     async def drill_end(
-        self, interaction: Interaction, proof_message_link: str, completed_count: int = -1
+        self, interaction: Interaction, proof_message_link: Optional[str] = None, completed_count: int = -1
     ):
         drill = await require_active_drill(interaction)
         if drill is None:
@@ -247,15 +255,17 @@ class DrillsCog(commands.Cog):
             await interaction.response.send_message("completed_count can't be greater than the roster size.", ephemeral=True)
             return
 
-        proof_message = await self._resolve_proof_message(interaction, d, proof_message_link)
-        if proof_message is None:
-            # _resolve_proof_message already sent the ephemeral explanation.
-            return
+        proof_message = None
+        if proof_message_link:
+            proof_message = await self._resolve_proof_message(interaction, d, proof_message_link)
+            if proof_message is None:
+                # _resolve_proof_message already sent the ephemeral explanation.
+                return
 
         cursor.execute(
             "UPDATE drills SET status = 'completed', ended_at = CURRENT_TIMESTAMP, "
             "proof_channel_id = ?, proof_message_id = ? WHERE id = ?",
-            (proof_message.channel.id, proof_message.id, d["id"])
+            (proof_message.channel.id if proof_message else None, proof_message.id if proof_message else None, d["id"])
         )
         conn.commit()
 
@@ -265,12 +275,13 @@ class DrillsCog(commands.Cog):
         await post_drill_completion_log(interaction.guild, d["id"], participant_count, completed_count)
 
         failed_count = participant_count - completed_count
+        proof_line = f"Proof: {proof_message.jump_url}\n\n" if proof_message else "\n"
         await interaction.response.send_message(
             f"**Drill #{d['id']} complete - {d['drill_name']}**\n"
             f"Participants: {participant_count}\n"
             f"Completed: {completed_count}\n"
             f"Failed: {failed_count}\n"
-            f"Proof: {proof_message.jump_url}\n\n"
+            f"{proof_line}"
             f"Results have been recorded ✅"
         )
 
@@ -499,7 +510,7 @@ class DrillsCog(commands.Cog):
     )
     @app_commands.guilds(GUILD_ID)
     @is_host()
-    async def drill_vc_block(self, interaction: Interaction, target: discord.Member, reason: str = ""):
+    async def drill_vc_block(self, interaction: Interaction, target: Union[discord.Member, discord.Role], reason: str = ""):
         drill = await require_active_drill(interaction)
         if drill is None:
             return
@@ -534,7 +545,7 @@ class DrillsCog(commands.Cog):
     )
     @app_commands.guilds(GUILD_ID)
     @is_host()
-    async def drill_vc_allow(self, interaction: Interaction, target: discord.Member):
+    async def drill_vc_allow(self, interaction: Interaction, target: Union[discord.Member, discord.Role]):
         drill = await require_active_drill(interaction)
         if drill is None:
             return
@@ -560,7 +571,7 @@ class DrillsCog(commands.Cog):
     )
     @app_commands.guilds(GUILD_ID)
     @is_host()
-    async def drill_vc_clear(self, interaction: Interaction, target: discord.Member):
+    async def drill_vc_clear(self, interaction: Interaction, target: Union[discord.Member, discord.Role]):
         drill = await require_active_drill(interaction)
         if drill is None:
             return
@@ -705,7 +716,7 @@ class DrillsCog(commands.Cog):
     )
     @app_commands.guilds(GUILD_ID)
     @is_host()
-    async def drill_default_block(self, interaction: Interaction, target: discord.Member, reason: str = ""):
+    async def drill_default_block(self, interaction: Interaction, target: Union[discord.Member, discord.Role], reason: str = ""):
         target_type = "role" if isinstance(target, discord.Role) else "user"
         cursor.execute("""
             INSERT INTO drill_host_defaults (host_discord_id, target_type, target_id, permission) VALUES (?, ?, ?, 'blocked')
@@ -727,7 +738,7 @@ class DrillsCog(commands.Cog):
     )
     @app_commands.guilds(GUILD_ID)
     @is_host()
-    async def drill_default_allow(self, interaction: Interaction, target: discord.Member):
+    async def drill_default_allow(self, interaction: Interaction, target: Union[discord.Member, discord.Role]):
         target_type = "role" if isinstance(target, discord.Role) else "user"
         cursor.execute("""
             INSERT INTO drill_host_defaults (host_discord_id, target_type, target_id, permission) VALUES (?, ?, ?, 'allowed')
