@@ -155,16 +155,18 @@ CREATE TABLE IF NOT EXISTS drill_vc_overrides (
 )
 """)
 
-# Division-wide drill VC ban list (staff-managed, /drill_ban and /drill_unban)
-# - unlike drill_vc_overrides above, this isn't scoped to one drill. Applied
-# as the last, highest-priority layer in sync_drill_vc_permissions() so it
-# can't be overridden by a host's own per-drill allow.
+# Division-wide drill VC ban list (staff-managed, /drill_ban, /drill_tempban,
+# and /drill_unban) - unlike drill_vc_overrides above, this isn't scoped to
+# one drill. Applied as the last, highest-priority layer in
+# sync_drill_vc_permissions() so it can't be overridden by a host's own
+# per-drill allow.
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS drill_banned_users (
     discord_id INTEGER PRIMARY KEY,
     banned_by INTEGER,
     reason TEXT,
-    banned_at TEXT DEFAULT CURRENT_TIMESTAMP
+    banned_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    banned_until TEXT
 )
 """)
 
@@ -363,6 +365,15 @@ ensure_column("drills", "stale_warned", "INTEGER DEFAULT 0")
 # deleted by the host).
 ensure_column("drills", "log_channel_id", "INTEGER")
 ensure_column("drills", "log_message_id", "INTEGER")
+# NULL = permanent ban (the only kind that existed before /drill_tempban).
+# When set, a UTC timestamp ('YYYY-MM-DD HH:MM:SS', same format/timezone as
+# banned_at's CURRENT_TIMESTAMP default) past which the ban no longer
+# applies - see drill_tempban_expiry_loop in bot/tasks.py, which deletes the
+# row once banned_until passes, and every drill_banned_users read
+# elsewhere (is_user_blocked_from_drill/sync_drill_vc_permissions in
+# bot/drills.py, /drill_ban_list in bot/cogs/drills.py), which additionally
+# filter it out defensively in between loop ticks.
+ensure_column("drill_banned_users", "banned_until", "TEXT")
 
 
 def get_active_season_id() -> int:

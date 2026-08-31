@@ -341,7 +341,10 @@ def is_user_blocked_from_drill(drill_id: int, member: discord.Member) -> bool:
     participant list either. Checks the same two sources
     sync_drill_vc_permissions() does, in the same priority order (a global
     ban is checked first and short-circuits the per-drill check)."""
-    cursor.execute("SELECT 1 FROM drill_banned_users WHERE discord_id = ?", (member.id,))
+    cursor.execute(
+        "SELECT 1 FROM drill_banned_users WHERE discord_id = ? AND (banned_until IS NULL OR banned_until > CURRENT_TIMESTAMP)",
+        (member.id,)
+    )
     if cursor.fetchone():
         return True
 
@@ -415,7 +418,13 @@ async def sync_drill_vc_permissions(guild: discord.Guild, drill_id: int):
          one, or have staff strip a host's own access for cause.
       5. Global bans (drill_banned_users) - connect always denied,
          regardless of anything above, including the host layer - the one
-         thing nobody can override for their own drill.
+         thing nobody can override for their own drill. Covers both
+         permanent bans (/drill_ban) and temporary ones (/drill_tempban,
+         banned_until IS NULL vs. a future timestamp respectively) - an
+         expired tempban is excluded here the same way it is everywhere
+         else this table is read, though in practice
+         drill_tempban_expiry_loop (bot/tasks.py) deletes the row and
+         re-syncs before it'd ever show up as still active in a query.
 
     Recomputing from scratch (rather than patching individual overwrites) on
     every change keeps this the single source of truth - no risk of a stale
@@ -510,7 +519,9 @@ async def sync_drill_vc_permissions(guild: discord.Guild, drill_id: int):
         if target:
             ow(target).connect = (permission == "allowed")
 
-    cursor.execute("SELECT discord_id FROM drill_banned_users")
+    cursor.execute(
+        "SELECT discord_id FROM drill_banned_users WHERE banned_until IS NULL OR banned_until > CURRENT_TIMESTAMP"
+    )
     for (banned_discord_id,) in cursor.fetchall():
         member = guild.get_member(banned_discord_id)
         if member:

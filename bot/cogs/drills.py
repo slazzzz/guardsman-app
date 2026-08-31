@@ -632,18 +632,29 @@ class DrillsCog(commands.Cog):
 
     ### DIVISION-WIDE DRILL BANS ###
     # Separate from the per-drill overrides above - staff-only, and applies
-    # to every drill (current and future), not just one.
+    # to every drill (current and future), not just one. /drill_ban is
+    # permanent; /drill_tempban is the same thing with an expiry - kept as
+    # its own command rather than an optional duration on /drill_ban so a
+    # staffer fat-fingering a duration option can't accidentally turn a
+    # permanent ban into one that quietly lapses (and vice versa, an
+    # omitted duration silently becoming permanent).
 
     @app_commands.command(
         name="drill_ban",
-        description="Ban a member from every drill voice channel division-wide.",
+        description="Permanently ban a member from every drill voice channel division-wide.",
     )
     @app_commands.guilds(GUILD_ID)
     @is_admin_or_staff()
     async def drill_ban(self, interaction: Interaction, member: discord.Member, reason: str = ""):
+        # banned_until is explicitly reset to NULL (permanent) on conflict
+        # too, not just on insert - otherwise re-running this on someone
+        # already under an active /drill_tempban would leave their old
+        # expiry sitting in the row, and the "permanent" ban would silently
+        # lapse later despite /drill_ban having been used.
         cursor.execute("""
-            INSERT INTO drill_banned_users (discord_id, banned_by, reason) VALUES (?, ?, ?)
-            ON CONFLICT(discord_id) DO UPDATE SET banned_by = excluded.banned_by, reason = excluded.reason, banned_at = CURRENT_TIMESTAMP
+            INSERT INTO drill_banned_users (discord_id, banned_by, reason, banned_until) VALUES (?, ?, ?, NULL)
+            ON CONFLICT(discord_id) DO UPDATE SET
+                banned_by = excluded.banned_by, reason = excluded.reason, banned_until = NULL, banned_at = CURRENT_TIMESTAMP
         """, (member.id, interaction.user.id, reason))
         conn.commit()
 
@@ -656,12 +667,86 @@ class DrillsCog(commands.Cog):
             await disconnect_members(interaction.guild, vc_channel_id, {member.id})
 
         reason_note = f" ({reason})" if reason else ""
-        await interaction.response.send_message(f"{member.mention} is now banned from all drill voice channels{reason_note} ✅", ephemeral=True)
+        await interaction.response.send_message(
+            f"{member.mention} is now permanently banned from all drill voice channels{reason_note} ✅", ephemeral=True
+        )
+
+
+    @app_commands.command(
+        name="drill_tempban",
+        description="Temporarily ban a member from every drill voice channel division-wide, for a set duration.",
+    )
+    @app_commands.guilds(GUILD_ID)
+    @app_commands.choices(unit=[
+        app_commands.Choice(name="Minutes", value="minutes"),
+        app_commands.Choice(name="Hours", value="hours"),
+        app_commands.Choice(name="Days", value="days"),
+    ])
+    @app_commands.describe(
+        duration="How long the ban should last - paired with the unit below.",
+        unit="Unit the duration above is measured in.",
+        reason="Why this member is being temp-banned - shown in /drill_ban_list.",
+    )
+    @is_admin_or_staff()
+    async def drill_tempban(
+        self, interaction: Interaction, member: discord.Member, duration: int, unit: str, reason: str = ""
+    ):
+        if duration <= 0:
+            await interaction.response.send_message(
+                "duration must be greater than 0 - use /drill_ban for a permanent ban.", ephemeral=True
+            )
+            return
+
+        # Computed in SQL via datetime('now', ...) rather than in Python, so
+        # banned_until lands in the exact same format/timezone (SQLite's
+        # CURRENT_TIMESTAMP - and therefore datetime('now') - is UTC) as
+        # banned_at's own default and every comparison made against it
+        # elsewhere (is_user_blocked_from_drill/sync_drill_vc_permissions in
+        # bot/drills.py, drill_tempban_expiry_loop in bot/tasks.py, and
+        # /drill_ban_list below) - no risk of a local-vs-UTC mismatch
+        # creeping in between where it's set and where it's read. `unit` is
+        # safe to interpolate here despite going through an f-string first:
+        # it's still passed through as bound parameter data (the `?`
+        # placeholder), never concatenated into the SQL text itself, and
+        # Discord's own @app_commands.choices already restricts it to
+        # exactly "minutes"/"hours"/"days" before this code ever runs.
+        modifier = f"+{duration} {unit}"
+
+        # Same upsert as /drill_ban, except banned_until is set from the
+        # computed expiry instead of forced to NULL - this deliberately
+        # overwrites an existing PERMANENT ban with a temporary one too, if
+        # staff runs this on someone /drill_ban already caught: same
+        # "whichever ban command ran most recently wins" behavior /drill_ban
+        # has in the other direction above.
+        cursor.execute("""
+            INSERT INTO drill_banned_users (discord_id, banned_by, reason, banned_until)
+            VALUES (?, ?, ?, datetime('now', ?))
+            ON CONFLICT(discord_id) DO UPDATE SET
+                banned_by = excluded.banned_by, reason = excluded.reason,
+                banned_until = excluded.banned_until, banned_at = CURRENT_TIMESTAMP
+        """, (member.id, interaction.user.id, reason, modifier))
+        conn.commit()
+
+        cursor.execute("SELECT banned_until FROM drill_banned_users WHERE discord_id = ?", (member.id,))
+        (banned_until,) = cursor.fetchone()
+
+        # Same immediate-effect sync/disconnect as /drill_ban above.
+        cursor.execute("SELECT id, vc_channel_id FROM drills WHERE status = 'in_progress' AND vc_channel_id IS NOT NULL")
+        for drill_id, vc_channel_id in cursor.fetchall():
+            await sync_drill_vc_permissions(interaction.guild, drill_id)
+            await disconnect_members(interaction.guild, vc_channel_id, {member.id})
+
+        reason_note = f" ({reason})" if reason else ""
+        await interaction.response.send_message(
+            f"{member.mention} is now banned from all drill voice channels until "
+            f"**{banned_until} UTC**{reason_note} ✅",
+            ephemeral=True
+        )
 
 
     @app_commands.command(
         name="drill_unban",
-        description="Remove a member's division-wide drill VC ban.",
+        description="Remove a member's division-wide drill VC ban (permanent or temporary).",
     )
     @app_commands.guilds(GUILD_ID)
     @is_admin_or_staff()
@@ -688,17 +773,26 @@ class DrillsCog(commands.Cog):
     @app_commands.guilds(GUILD_ID)
     @is_admin_or_staff()
     async def drill_ban_list(self, interaction: Interaction):
-        cursor.execute("SELECT discord_id, reason, banned_by, banned_at FROM drill_banned_users ORDER BY banned_at DESC")
+        # Filters out anything already past its banned_until defensively -
+        # drill_tempban_expiry_loop (bot/tasks.py) deletes expired rows on
+        # its own tick, but this stops a row that just expired and hasn't
+        # been swept yet from showing up here as still banned.
+        cursor.execute("""
+            SELECT discord_id, reason, banned_by, banned_at, banned_until FROM drill_banned_users
+            WHERE banned_until IS NULL OR banned_until > CURRENT_TIMESTAMP
+            ORDER BY banned_at DESC
+        """)
         rows = cursor.fetchall()
 
         if not rows:
             await interaction.response.send_message("No one is currently drill-banned.", ephemeral=True)
             return
 
-        lines = [
-            f"<@{discord_id}> - {reason or 'no reason given'} (by <@{banned_by}>, {banned_at})"
-            for discord_id, reason, banned_by, banned_at in rows
-        ]
+        lines = []
+        for discord_id, reason, banned_by, banned_at, banned_until in rows:
+            expiry_note = f", expires {banned_until} UTC" if banned_until else ", permanent"
+            lines.append(f"<@{discord_id}> - {reason or 'no reason given'} (by <@{banned_by}>, {banned_at}{expiry_note})")
+
         await interaction.response.send_message(
             embed=Embed(title="Drill VC Bans", description="\n".join(lines)), ephemeral=True
         )

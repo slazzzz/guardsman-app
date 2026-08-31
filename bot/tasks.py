@@ -9,12 +9,13 @@ from discord.ext import tasks
 from bot.client import bot
 from bot.config import DRILL_STALE_CANCEL_HOURS, DRILL_STALE_WARNING_HOURS
 from bot.database import conn, cursor
-from bot.drills import drill_as_dict, refresh_drill_message
+from bot.drills import drill_as_dict, refresh_drill_message, sync_drill_vc_permissions
 from bot.leaderboard import build_stat_leaderboard_embed, build_stat_leaderboard_image
 
 REMINDER_WINDOW = timedelta(hours=1)
 STAT_LEADERBOARD_TICK_MINUTES = 5
 DRILL_EXPIRY_TICK_MINUTES = 15
+DRILL_TEMPBAN_EXPIRY_TICK_MINUTES = 1
 
 
 @tasks.loop(minutes=1)
@@ -268,4 +269,68 @@ async def drill_expiry_loop_error(error: Exception):
 
 @drill_expiry_loop.before_loop
 async def before_drill_expiry_loop():
+    await bot.wait_until_ready()
+
+
+@tasks.loop(minutes=DRILL_TEMPBAN_EXPIRY_TICK_MINUTES)
+async def drill_tempban_expiry_loop():
+    """Sweeps drill_banned_users for /drill_tempban rows whose banned_until
+    has passed and lifts them - permanent bans (banned_until IS NULL) are
+    never touched here. Every read of drill_banned_users elsewhere
+    (is_user_blocked_from_drill/sync_drill_vc_permissions in bot/drills.py,
+    /drill_ban_list in bot/cogs/drills.py) already filters expired rows out
+    on its own, so this loop isn't what makes an expired tempban stop
+    working - it's just what actually deletes the row and re-syncs any
+    live drill VC so the member can reconnect without staff having to run
+    /drill_unban by hand.
+
+    banned_until is compared directly against SQLite's CURRENT_TIMESTAMP
+    (both UTC) rather than parsed into a Python datetime and compared
+    against datetime.now() - deliberately avoiding the local-vs-UTC
+    mismatch that pattern would introduce here.
+    """
+    try:
+        cursor.execute(
+            "SELECT discord_id FROM drill_banned_users WHERE banned_until IS NOT NULL AND banned_until <= CURRENT_TIMESTAMP"
+        )
+        expired_discord_ids = [row[0] for row in cursor.fetchall()]
+    except sqlite3.Error as e:
+        print(f"drill_tempban_expiry_loop: could not query drill_banned_users, skipping this tick: {e}")
+        return
+
+    if not expired_discord_ids:
+        return
+
+    try:
+        cursor.execute(
+            "DELETE FROM drill_banned_users WHERE banned_until IS NOT NULL AND banned_until <= CURRENT_TIMESTAMP"
+        )
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"drill_tempban_expiry_loop: could not delete expired bans, skipping this tick: {e}")
+        return
+
+    # Mirrors /drill_unban: re-sync every in-progress drill's VC so the
+    # newly-unbanned member(s) can actually reconnect, not just so the DB
+    # row is gone. Doesn't attempt to disconnect/reconnect anyone itself -
+    # lifting a ban only needs to stop denying future connects, unlike
+    # /drill_ban and /drill_tempban, which do actively disconnect on the
+    # way IN.
+    for guild in bot.guilds:
+        cursor.execute("SELECT id FROM drills WHERE status = 'in_progress' AND vc_channel_id IS NOT NULL")
+        for (drill_id,) in cursor.fetchall():
+            await sync_drill_vc_permissions(guild, drill_id)
+
+    print(f"drill_tempban_expiry_loop: lifted {len(expired_discord_ids)} expired drill tempban(s): {expired_discord_ids}")
+
+
+@drill_tempban_expiry_loop.error
+async def drill_tempban_expiry_loop_error(error: Exception):
+    print(f"drill_tempban_expiry_loop crashed unexpectedly, restarting it: {error}")
+    if not drill_tempban_expiry_loop.is_running():
+        drill_tempban_expiry_loop.restart()
+
+
+@drill_tempban_expiry_loop.before_loop
+async def before_drill_tempban_expiry_loop():
     await bot.wait_until_ready()
