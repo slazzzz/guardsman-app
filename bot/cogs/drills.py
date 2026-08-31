@@ -259,13 +259,7 @@ class DrillsCog(commands.Cog):
         )
         conn.commit()
 
-        if d["vc_channel_id"]:
-            vc = interaction.guild.get_channel(d["vc_channel_id"])
-            if vc:
-                try:
-                    await vc.delete(reason=f"Drill #{d['id']} ended")
-                except (discord.Forbidden, discord.HTTPException) as e:
-                    print(f"Could not delete VC for drill {d['id']}: {e}")
+        await teardown_drill_vc(interaction.guild, d, reason=f"Drill #{d['id']} ended")
 
         await refresh_drill_message(d["id"])
         await post_drill_completion_log(interaction.guild, d["id"], participant_count, completed_count)
@@ -386,13 +380,7 @@ class DrillsCog(commands.Cog):
         cursor.execute("UPDATE drills SET status = 'cancelled', ended_at = CURRENT_TIMESTAMP WHERE id = ?", (d["id"],))
         conn.commit()
 
-        if d["vc_channel_id"]:
-            vc = interaction.guild.get_channel(d["vc_channel_id"])
-            if vc:
-                try:
-                    await vc.delete(reason=f"Drill #{d['id']} cancelled")
-                except (discord.Forbidden, discord.HTTPException) as e:
-                    print(f"Could not delete VC for drill {d['id']}: {e}")
+        await teardown_drill_vc(interaction.guild, d, reason=f"Drill #{d['id']} cancelled")
 
         await refresh_drill_message(d["id"])
         await interaction.response.send_message(f"Drill #{d['id']} ({d['drill_name']}) cancelled.", ephemeral=True)
@@ -840,6 +828,121 @@ class DrillsCog(commands.Cog):
             f"clean that up separately (e.g. /drill_cancel or /drill_end) if the drill's actually over.",
             ephemeral=True
         )
+
+
+    @app_commands.command(
+        name="drill_force_cancel",
+        description="[Staff] Cancel any drill, host or not - for moderation issues, an unresponsive host, etc.",
+    )
+    @app_commands.guilds(GUILD_ID)
+    @app_commands.describe(
+        reason="Why this is being force-cancelled - included in the host's DM.",
+        drill_number="1-indexed, most recent first. 0 (default) = most recent drill.",
+    )
+    @is_admin_or_staff()
+    async def drill_force_cancel(self, interaction: Interaction, reason: str = "", drill_number: int = 0):
+        drill = await require_drill(interaction, drill_number)
+        if drill is None:
+            return
+
+        d = drill_as_dict(drill)
+
+        if d["status"] in ("completed", "cancelled"):
+            await interaction.response.send_message(f"Drill #{d['id']} is already {d['status']}.", ephemeral=True)
+            return
+
+        cursor.execute("UPDATE drills SET status = 'cancelled', ended_at = CURRENT_TIMESTAMP WHERE id = ?", (d["id"],))
+        conn.commit()
+
+        await teardown_drill_vc(interaction.guild, d, reason=f"Drill #{d['id']} force-cancelled by staff")
+        await refresh_drill_message(d["id"])
+
+        reason_note = f" ({reason})" if reason else ""
+        await interaction.response.send_message(
+            f"Drill #{d['id']} ({d['drill_name']}) force-cancelled{reason_note} ✅", ephemeral=True
+        )
+
+        # Best-effort - a failed DM (blocked/left server) shouldn't stop the
+        # cancellation itself from going through.
+        try:
+            host = await bot.fetch_user(d["host_discord_id"])
+            dm = f"🛡️ Your drill **{d['drill_name']}** (#{d['id']}) was cancelled by staff."
+            if reason:
+                dm += f"\n**Reason:** {reason}"
+            await host.send(dm)
+        except (discord.Forbidden, discord.NotFound):
+            pass
+
+
+    @app_commands.command(
+        name="drill_force_end",
+        description="[Staff] End any drill, host or not, without requiring a proof message - for moderation issues.",
+    )
+    @app_commands.guilds(GUILD_ID)
+    @app_commands.describe(
+        completed_count="How many participants completed the objective. Leave at -1 to count everyone as completed.",
+        reason="Why this is being force-ended - included in the host's DM and the completion log.",
+        drill_number="1-indexed, most recent first. 0 (default) = most recent drill.",
+    )
+    @is_admin_or_staff()
+    async def drill_force_end(self, interaction: Interaction, completed_count: int = -1, reason: str = "", drill_number: int = 0):
+        drill = await require_drill(interaction, drill_number)
+        if drill is None:
+            return
+
+        d = drill_as_dict(drill)
+
+        if d["status"] in ("completed", "cancelled"):
+            await interaction.response.send_message(f"Drill #{d['id']} is already {d['status']}.", ephemeral=True)
+            return
+
+        participant_count = get_active_participant_count(d["id"])
+
+        if completed_count < 0:
+            completed_count = participant_count
+        elif completed_count > participant_count:
+            await interaction.response.send_message("completed_count can't be greater than the roster size.", ephemeral=True)
+            return
+
+        # Unlike /drill_end, this deliberately skips _resolve_proof_message -
+        # staff forcing a drill closed for a moderation issue (host went
+        # dark, a dispute, misconduct mid-drill) is exactly the situation
+        # where waiting on a screenshot isn't realistic. proof_channel_id/
+        # proof_message_id are left NULL, same as any drill that was never
+        # given proof - build_drill_embed and post_drill_completion_log both
+        # already handle that being absent.
+        cursor.execute(
+            "UPDATE drills SET status = 'completed', ended_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (d["id"],)
+        )
+        conn.commit()
+
+        await teardown_drill_vc(interaction.guild, d, reason=f"Drill #{d['id']} force-ended by staff")
+        await refresh_drill_message(d["id"])
+
+        forced_note = f"Force-ended by staff (<@{interaction.user.id}>)"
+        if reason:
+            forced_note += f" - {reason}"
+        await post_drill_completion_log(interaction.guild, d["id"], participant_count, completed_count, forced_note=forced_note)
+
+        failed_count = participant_count - completed_count
+        reason_note = f"\n**Reason:** {reason}" if reason else ""
+        await interaction.response.send_message(
+            f"**Drill #{d['id']} force-ended - {d['drill_name']}**\n"
+            f"Participants: {participant_count}\n"
+            f"Completed: {completed_count}\n"
+            f"Failed: {failed_count}{reason_note}\n\n"
+            f"Results have been recorded ✅"
+        )
+
+        try:
+            host = await bot.fetch_user(d["host_discord_id"])
+            dm = f"🛡️ Your drill **{d['drill_name']}** (#{d['id']}) was ended by staff."
+            if reason:
+                dm += f"\n**Reason:** {reason}"
+            await host.send(dm)
+        except (discord.Forbidden, discord.NotFound):
+            pass
 
 
     @app_commands.command(

@@ -271,7 +271,7 @@ async def refresh_drill_message(drill_id: int):
         print(f"refresh_drill_message: could not edit drill {drill_id}'s roster message: {e}")
 
 
-async def post_drill_completion_log(guild: discord.Guild, drill_id: int, participant_count: int, completed_count: int):
+async def post_drill_completion_log(guild: discord.Guild, drill_id: int, participant_count: int, completed_count: int, forced_note: Optional[str] = None):
     """Posts a bot-authored summary of a just-completed drill to
     bot.config.DRILL_LOG_CHANNEL_ID (host, roster size, completed/failed
     counts, a link to the proof message) and saves the resulting message's
@@ -280,11 +280,15 @@ async def post_drill_completion_log(guild: discord.Guild, drill_id: int, partici
     silently if that channel isn't configured, same as
     DRILL_VC_CATEGORY_ID/DRILL_PROOF_CHANNEL_ID being optional elsewhere.
 
-    Called once, from /drill_end (bot/cogs/drills.py) right after a drill is
-    marked completed. Deliberately doesn't get called again later if the
-    drill's record changes (e.g. a staff /drill_force_status correction) -
-    this is meant to be an immutable log of what was recorded at completion
-    time, not a live mirror of the row.
+    Called from /drill_end right after a drill is marked completed, and
+    from /drill_force_end (bot/cogs/drills.py) for a staff-forced
+    completion - forced_note carries the "force-completed by staff" note
+    and reason for the latter, so the two paths are distinguishable in the
+    log without this needing two near-identical functions. Deliberately
+    doesn't get called again later if the drill's record changes (e.g. a
+    staff /drill_force_status correction) - this is meant to be an
+    immutable log of what was recorded at completion time, not a live
+    mirror of the row.
     """
     if not DRILL_LOG_CHANNEL_ID:
         return
@@ -312,6 +316,8 @@ async def post_drill_completion_log(guild: discord.Guild, drill_id: int, partici
     if d["proof_channel_id"] and d["proof_message_id"]:
         proof_url = f"https://discord.com/channels/{GUILD_ID}/{d['proof_channel_id']}/{d['proof_message_id']}"
         lines.append(f"**Proof:** [jump to message]({proof_url})")
+    if forced_note:
+        lines.append(f"**Note:** {forced_note}")
 
     embed = Embed(title=f"✅ Drill #{d['id']} Completed - {d['drill_name']}", description="\n".join(lines))
 
@@ -494,7 +500,6 @@ async def sync_drill_vc_permissions(guild: discord.Guild, drill_id: int):
         host_ow.mute_members = True
         host_ow.deafen_members = True
         host_ow.move_members = True
-        host_ow.use_application_commands = True
 
     cursor.execute(
         "SELECT target_type, target_id, permission FROM drill_vc_overrides WHERE drill_id = ?",
@@ -515,6 +520,23 @@ async def sync_drill_vc_permissions(guild: discord.Guild, drill_id: int):
         await vc.edit(overwrites=overwrites)
     except (discord.Forbidden, discord.HTTPException) as e:
         print(f"sync_drill_vc_permissions: could not update overwrites for drill {drill_id}: {e}")
+
+
+async def teardown_drill_vc(guild: discord.Guild, drill: dict, reason: str) -> None:
+    """Deletes a drill's voice channel, if it has one - shared tail end of
+    /drill_cancel, /drill_end, and the staff /drill_force_cancel and
+    /drill_force_end below, so all four delete it the same way (best-effort,
+    logging rather than raising on failure) instead of four separate
+    try/except copies."""
+    if not drill["vc_channel_id"]:
+        return
+    vc = guild.get_channel(drill["vc_channel_id"])
+    if not vc:
+        return
+    try:
+        await vc.delete(reason=reason)
+    except (discord.Forbidden, discord.HTTPException) as e:
+        print(f"teardown_drill_vc: could not delete VC for drill {drill['id']}: {e}")
 
 
 async def disconnect_members(guild: discord.Guild, vc_channel_id: int, member_ids: set[int]):
