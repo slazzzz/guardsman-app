@@ -509,6 +509,7 @@ async def sync_drill_vc_permissions(guild: discord.Guild, drill_id: int):
         host_ow.mute_members = True
         host_ow.deafen_members = True
         host_ow.move_members = True
+        host_ow.use_application_commands = True
 
     cursor.execute(
         "SELECT target_type, target_id, permission FROM drill_vc_overrides WHERE drill_id = ?",
