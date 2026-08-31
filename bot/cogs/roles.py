@@ -100,7 +100,7 @@ class RolesCog(commands.Cog):
         # tier ladder - strip Guardsman Access too rather than leaving
         # channel access behind with no tier role to justify it.
         access_note = ""
-        if role.id in TIER_ROLES and GUARDSMAN_ACCESS_ROLE and GUARDSMAN_ACCESS_ROLE in member_roles:
+        if role.id in TIER_ROLES and GUARDSMAN_ACCESS_ROLE in member_roles:
             remaining_rank_roles = [r for r in member_roles if r != role.id and r in TIER_ROLES]
             if not remaining_rank_roles:
                 access_role = interaction.guild.get_role(GUARDSMAN_ACCESS_ROLE)
