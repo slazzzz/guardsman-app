@@ -11,7 +11,7 @@ import discord
 from discord import Embed
 
 from bot.client import bot
-from bot.config import DRILL_LOG_CHANNEL_ID, GUILD_ID
+from bot.config import DRILL_LOG_CHANNEL_ID, EXPENDABLE_ROLE_ID, GUILD_ID, UNDER_REVIEW_ROLE_ID
 from bot.database import conn, cursor
 
 # drills table column order, for readable tuple-unpacking below - keep this
@@ -315,34 +315,59 @@ def is_user_blocked_from_drill(drill_id: int, member: discord.Member) -> bool:
 async def sync_drill_vc_permissions(guild: discord.Guild, drill_id: int):
     """Recomputes and applies the full set of voice permission overwrites for
     a drill's VC from scratch. Layers are applied in this order - for any
-    given member/role that more than one layer targets, the later layer
-    wins (earlier layers can still stand for everyone else that layer
-    covers, so a host being exempted from a lock doesn't remove the lock for
-    anyone else):
+    given member/role that more than one layer targets, later layers only
+    override the SPECIFIC permission flags they set (via the ow() helper
+    below), not the whole overwrite - so e.g. the host's view_channel grant
+    doesn't accidentally erase their connect grant, and a per-drill override
+    on a role doesn't erase that role's other denied permissions unless it
+    explicitly sets them too:
 
-      1. Base: @everyone denied connect, if the drill is 'private' or locked -
-         otherwise @everyone is left alone (inherits from the category).
+      0. Access-tier roles: UNDER_REVIEW_ROLE_ID (if configured) is denied
+         every relevant permission on every drill VC, no exceptions -
+         mirrors the server-wide convention of locking this role out of
+         voice entirely. EXPENDABLE_ROLE_ID (if configured) is denied just
+         view_channel, so members with it can't see a drill VC exists
+         unless they're the host or an active participant (layers 2b/3
+         grant those two an explicit view_channel=True, which - being
+         member-specific - wins over this role-level deny). This layer is
+         unconditional (applies regardless of the drill's public/private
+         mode) since it's a standing access-tier rule, not a per-drill
+         setting. NOTE: this layer exists because vc.edit(overwrites=...)
+         below replaces the channel's ENTIRE overwrite set every time this
+         function runs - anything inherited from the category (like a
+         server-wide UNDER REVIEW deny-all) would otherwise get silently
+         wiped the moment a drill VC is first synced.
+      1. Base: @everyone is denied view_channel unconditionally (drill VCs
+         are never visible by default - only the host, active
+         participants, and anyone granted explicit access via layer 4
+         should ever see one), plus denied connect on top of that if the
+         drill is 'private' or locked.
       2. Roster allow: if 'private' and NOT locked, every currently-active
-         participant is explicitly allowed - this is what makes "private"
-         mean "roster only" rather than "nobody". Locking a private drill
-         drops this layer entirely, so locking always means "no new joins",
-         even for roster members who haven't connected yet.
-      3. Host permissions: the drill's host always gets connect + the power
-         to mute/deafen/move members, scoped to just this one VC via a
-         channel-specific overwrite (not a server-wide role) - so a host
-         can moderate their own drill without needing a standing staff role,
-         and can't touch any other channel with it. This also means a lock
-         or a private mode never accidentally locks the host out of their
+         participant is explicitly allowed to connect - this is what makes
+         "private" mean "roster only" rather than "nobody". Locking a
+         private drill drops the connect grant entirely, so locking always
+         means "no new joins", even for roster members who haven't
+         connected yet.
+      2b. Roster visibility: regardless of vc_mode/lock, every currently-
+         active participant also gets view_channel=True, so an Expendable
+         participant can still see and join their own drill's VC.
+      3. Host permissions: the drill's host always gets view_channel +
+         connect + the power to mute/deafen/move members, scoped to just
+         this one VC via a channel-specific overwrite (not a server-wide
+         role) - so a host can moderate their own drill without needing a
+         standing staff role, and can't touch any other channel with it.
+         This also means a lock, a private mode, or the Expendable/Under
+         Review layer above never accidentally locks the host out of their
          own drill.
       4. Per-drill overrides (drill_vc_overrides) - a host/staff explicitly
-         blocking or allowing a specific member or role for this drill.
-         Wins over all three layers above - e.g. to admit one guest into an
-         otherwise-private drill, keep one specific roster member out of an
-         otherwise-open one, or have staff strip a host's own access for
-         cause.
-      5. Global bans (drill_banned_users) - always denied, regardless of
-         anything above, including the host layer - the one thing nobody
-         can override for their own drill.
+         blocking or allowing a specific member or role's connect
+         permission for this drill. Wins over all layers above for connect
+         specifically - e.g. to admit one guest into an otherwise-private
+         drill, keep one specific roster member out of an otherwise-open
+         one, or have staff strip a host's own access for cause.
+      5. Global bans (drill_banned_users) - connect always denied,
+         regardless of anything above, including the host layer - the one
+         thing nobody can override for their own drill.
 
     Recomputing from scratch (rather than patching individual overwrites) on
     every change keeps this the single source of truth - no risk of a stale
@@ -367,23 +392,65 @@ async def sync_drill_vc_permissions(guild: discord.Guild, drill_id: int):
 
     overwrites: dict = {}
 
+    def ow(target):
+        """Returns the in-progress PermissionOverwrite for target, creating
+        an empty one on first use - lets later layers set just the flags
+        they care about without clobbering flags an earlier layer already
+        set on the same target."""
+        return overwrites.setdefault(target, discord.PermissionOverwrite())
+
+    # 0. Access-tier roles - see docstring above for why this has to be
+    # rebuilt here on every sync instead of just living on the category.
+    if UNDER_REVIEW_ROLE_ID:
+        under_review_role = guild.get_role(UNDER_REVIEW_ROLE_ID)
+        if under_review_role:
+            under_review_ow = ow(under_review_role)
+            under_review_ow.view_channel = False
+            under_review_ow.connect = False
+            under_review_ow.speak = False
+            under_review_ow.stream = False
+            under_review_ow.use_voice_activation = False
+            under_review_ow.request_to_speak = False
+            under_review_ow.send_messages = False
+            under_review_ow.add_reactions = False
+
+    if EXPENDABLE_ROLE_ID:
+        expendable_role = guild.get_role(EXPENDABLE_ROLE_ID)
+        if expendable_role:
+            # Redundant with @everyone's view_channel=False below as long as
+            # that stays unconditional, but kept explicit as a safety net -
+            # if @everyone's deny is ever loosened later, Expendable should
+            # still be locked out on its own.
+            expendable_role_ow = ow(expendable_role)
+            expendable_role_ow.view_channel = False
+            expendable_role_ow.connect = False
+
+    default_role_ow = ow(guild.default_role)
+    default_role_ow.view_channel = False
+    default_role_ow.connect = False
     if d["vc_mode"] == "private" or d["vc_locked"]:
-        overwrites[guild.default_role] = discord.PermissionOverwrite(connect=False)
+        default_role_ow.connect = False
 
     if d["vc_mode"] == "private" and not d["vc_locked"]:
         for discord_id in get_active_participant_discord_ids(drill_id):
             member = guild.get_member(discord_id)
             if member:
-                overwrites[member] = discord.PermissionOverwrite(connect=True)
+                ow(member).connect = True
+
+    # 2b. Visibility exception for the roster, independent of vc_mode/lock.
+    for discord_id in get_active_participant_discord_ids(drill_id):
+        member = guild.get_member(discord_id)
+        if member:
+            ow(member).view_channel = True
 
     host_member = guild.get_member(d["host_discord_id"])
     if host_member:
-        overwrites[host_member] = discord.PermissionOverwrite(
-            connect=True,
-            mute_members=True,
-            deafen_members=True,
-            move_members=True,
-        )
+        host_ow = ow(host_member)
+        host_ow.view_channel = True
+        host_ow.connect = True
+        host_ow.mute_members = True
+        host_ow.deafen_members = True
+        host_ow.move_members = True
 
     cursor.execute(
         "SELECT target_type, target_id, permission FROM drill_vc_overrides WHERE drill_id = ?",
@@ -392,13 +459,13 @@ async def sync_drill_vc_permissions(guild: discord.Guild, drill_id: int):
     for target_type, target_id, permission in cursor.fetchall():
         target = guild.get_role(target_id) if target_type == "role" else guild.get_member(target_id)
         if target:
-            overwrites[target] = discord.PermissionOverwrite(connect=(permission == "allowed"))
+            ow(target).connect = (permission == "allowed")
 
     cursor.execute("SELECT discord_id FROM drill_banned_users")
     for (banned_discord_id,) in cursor.fetchall():
         member = guild.get_member(banned_discord_id)
         if member:
-            overwrites[member] = discord.PermissionOverwrite(connect=False)
+            ow(member).connect = False
 
     try:
         await vc.edit(overwrites=overwrites)

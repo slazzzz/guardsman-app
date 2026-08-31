@@ -58,10 +58,35 @@ GUILD: discord.Guild = discord.Object(id=GUILD_ID)
 
 ADMIN_USERS = guild_data.get("admin_users")
 
-MEMBER_ROLES = guild_data.get("member_roles")
 STAFF_ROLES = guild_data.get("staff_roles")
 HELPER_ROLES = guild_data.get("helper_roles")
 HOST_ROLES: Optional[int] = guild_data.get("host_roles")
+
+# The division's rank ladder (e.g. Recruit/Guardsman/Veteran/Elite) - purely
+# cosmetic/hierarchy roles now that channel perms live on Guardsman Access
+# alone. /rank_role_add and /rank_role_remove (bot/cogs/roles.py) restrict
+# themselves to roles in this list, and use it to detect when a member is
+# gaining their first rank role (new applicant - also grant Guardsman
+# Access) or losing their last one (grant revoked - also strip Guardsman
+# Access).
+TIER_ROLES: list[int] = guild_data.get("tier_roles", [])
+
+# The single role that actually carries channel permissions division-wide -
+# granted/revoked automatically by /rank_role_add and /rank_role_remove
+# alongside a rank role, per the docstring above.
+GUARDSMAN_ACCESS_ROLE: Optional[int] = guild_data.get("guardsman_access_role_id")
+
+# Membership, for bot purposes (is_allowed()/on_ready's player-DB sync),
+# relies on EITHER a rank role OR Guardsman Access - not strictly one or the
+# other. In steady state everyone with a rank role also has Guardsman
+# Access (that's what the two commands above enforce), but this covers the
+# gap right after only one side of that pairing has been granted (e.g. a
+# rank role added manually in Discord rather than through the bot), so
+# nobody is unexpectedly locked out of is_allowed()-gated commands mid-
+# transition. Computed from TIER_ROLES + GUARDSMAN_ACCESS_ROLE so the
+# two never need to be kept in sync by hand in bot_data.json - add a role to
+# either list above and membership recognition picks it up automatically.
+MEMBER_ROLES: list[int] = list(TIER_ROLES) + ([GUARDSMAN_ACCESS_ROLE] if GUARDSMAN_ACCESS_ROLE else [])
 
 EVENT_MODES = event_data.get("event_modes")
 EVENT_TYPES = event_data.get("event_types")
@@ -197,6 +222,24 @@ DRILLS_CHANNEL_ID: int = drill_data.get("drills_channel_id")
 DRILL_VC_CATEGORY_ID: Optional[int] = drill_data.get("drill_vc_category_id")
 DRILL_PROOF_CHANNEL_ID: Optional[int] = drill_data.get("drill_proof_channel_id")
 DRILL_LOG_CHANNEL_ID: Optional[int] = drill_data.get("drill_log_channel_id")
+
+# Both optional - if either is omitted, sync_drill_vc_permissions() just
+# skips that layer (see bot/drills.py). These exist because vc.edit(
+# overwrites=...) replaces a channel's ENTIRE overwrite set on every sync,
+# so anything inherited from the category (e.g. a server-wide "UNDER
+# REVIEW" deny-all set up on the category itself) gets silently wiped the
+# first time a drill VC is synced unless it's rebuilt here every time too.
+#
+# under_review_role_id: denied every relevant voice/text-in-voice
+# permission on every drill VC, no exceptions - mirrors the server-wide
+# convention of locking this role out of voice channels entirely.
+# expendable_role_id: denied view_channel only, so members with this role
+# can't see a drill VC exists unless they're the host or an active
+# participant (those two get an explicit per-member view_channel=True
+# overwrite, which - being member-specific - wins over the role-level deny
+# regardless of the drill's public/private mode).
+UNDER_REVIEW_ROLE_ID: Optional[int] = drill_data.get("under_review_role_id")
+EXPENDABLE_ROLE_ID: Optional[int] = drill_data.get("expendable_role_id")
 
 # Per-user cooldown on /drill_create, in seconds - stops one person from
 # flooding the drills channel with back-to-back posts. Staff/helpers/admins
