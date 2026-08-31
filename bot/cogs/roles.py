@@ -8,10 +8,12 @@ from bot.shared import *
 
 # Each entry is a mutually-exclusive tier ladder - adding a role from one of
 # these lists to a member auto-removes any other role they hold from that
-# same list first (a "promotion" swap rather than stacking tiers). Guardsman
-# Access is handled as a side effect only for RANK_ROLE_IDS specifically
-# (see guardsman_role_add/remove below) - the achievement ladders
-# (Endless Record/Win/Firewall) don't touch it.
+# same list first (a "promotion" swap rather than stacking tiers).
+# TIER_ROLES (bot/config.py) is the flattened union of all three - there's
+# no separate 4th "rank" ladder, so it's deliberately NOT one of the
+# entries below (it'd overlap every entry here and break the mutual-
+# exclusivity/swap logic). It's used only to detect "brand new" vs. "has a
+# Guardsman role already" - see guardsman_role_add/remove below.
 ROLE_ID_TIERS_CATEGORIES = [ENDLESS_RECORD_ROLE_IDS, WIN_ROLE_IDS, ENDLESS_FIREWALL_ROLE_IDS]
 
 class RolesCog(commands.Cog):
@@ -43,15 +45,20 @@ class RolesCog(commands.Cog):
             if role.id not in role_id_tiers:
                 continue
 
-            # For the rank ladder specifically: no existing role from this
-            # category means the applicant is brand new to the division, so
-            # Guardsman Access (the role that actually carries channel
-            # perms now) needs to be granted alongside their qualifying
-            # tier - staff handing out a tier role in the ticket is what
-            # used to grant channel access on its own, so this keeps that
-            # one action doing the same job it always did.
+            # No existing role from ANY of the three achievement ladders
+            # (i.e. nothing in TIER_ROLES) means the applicant is brand new
+            # to the division, so Guardsman Access (the role that actually
+            # carries channel perms now) needs to be granted alongside
+            # their qualifying role - staff handing out a role in the
+            # ticket is what used to grant channel access on its own, so
+            # this keeps that one action doing the same job it always did.
+            # Applies uniformly across all three ladders (not just
+            # whichever one `role` happens to belong to) since TIER_ROLES
+            # is their union - a member's FIRST role from any of them is
+            # what makes them new, regardless of which one it is.
             needs_access_role = (
-                GUARDSMAN_ACCESS_ROLE not in member_roles
+                GUARDSMAN_ACCESS_ROLE
+                and GUARDSMAN_ACCESS_ROLE not in member_roles
                 and not any(r in TIER_ROLES for r in member_roles)
             )
 
@@ -66,7 +73,7 @@ class RolesCog(commands.Cog):
                 access_role = interaction.guild.get_role(GUARDSMAN_ACCESS_ROLE)
                 if access_role:
                     roles_to_add.append(access_role)
-                    access_note = f" and granted {access_role.mention} (first rank role)"
+                    access_note = f" and granted {access_role.mention} (first Guardsman role)"
 
             await member.add_roles(*roles_to_add)
             await interaction.response.send_message(f"Added {role.mention} to {member.mention}{access_note}.", ephemeral=True)
@@ -96,17 +103,18 @@ class RolesCog(commands.Cog):
 
         await member.remove_roles(role)
 
-        # If that was their last rank role, they've fully left the division
-        # tier ladder - strip Guardsman Access too rather than leaving
-        # channel access behind with no tier role to justify it.
+        # If that was their last Guardsman role (across all three
+        # achievement ladders), they've fully left the division - strip
+        # Guardsman Access too rather than leaving channel access behind
+        # with nothing to justify it.
         access_note = ""
-        if role.id in TIER_ROLES and GUARDSMAN_ACCESS_ROLE in member_roles:
-            remaining_rank_roles = [r for r in member_roles if r != role.id and r in TIER_ROLES]
-            if not remaining_rank_roles:
+        if role.id in TIER_ROLES and GUARDSMAN_ACCESS_ROLE and GUARDSMAN_ACCESS_ROLE in member_roles:
+            remaining_guardsman_roles = [r for r in member_roles if r != role.id and r in TIER_ROLES]
+            if not remaining_guardsman_roles:
                 access_role = interaction.guild.get_role(GUARDSMAN_ACCESS_ROLE)
                 if access_role:
                     await member.remove_roles(access_role)
-                    access_note = f" and removed {access_role.mention} (no rank roles remaining)"
+                    access_note = f" and removed {access_role.mention} (no Guardsman roles remaining)"
 
         await interaction.response.send_message(f"Removed {role.mention} from {member.mention}{access_note}.", ephemeral=True)
 

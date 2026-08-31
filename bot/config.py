@@ -62,31 +62,12 @@ STAFF_ROLES = guild_data.get("staff_roles")
 HELPER_ROLES = guild_data.get("helper_roles")
 HOST_ROLES: Optional[int] = guild_data.get("host_roles")
 
-# The division's rank ladder (e.g. Recruit/Guardsman/Veteran/Elite) - purely
-# cosmetic/hierarchy roles now that channel perms live on Guardsman Access
-# alone. /rank_role_add and /rank_role_remove (bot/cogs/roles.py) restrict
-# themselves to roles in this list, and use it to detect when a member is
-# gaining their first rank role (new applicant - also grant Guardsman
-# Access) or losing their last one (grant revoked - also strip Guardsman
-# Access).
-TIER_ROLES: list[int] = guild_data.get("tier_roles", [])
-
 # The single role that actually carries channel permissions division-wide -
-# granted/revoked automatically by /rank_role_add and /rank_role_remove
-# alongside a rank role, per the docstring above.
+# granted/revoked automatically by /guardsman_role_add and
+# /guardsman_role_remove (bot/cogs/roles.py) alongside a member's first/last
+# Guardsman role - see TIER_ROLES below, defined further down once the
+# three lists it's built from exist.
 GUARDSMAN_ACCESS_ROLE: Optional[int] = guild_data.get("guardsman_access_role_id")
-
-# Membership, for bot purposes (is_allowed()/on_ready's player-DB sync),
-# relies on EITHER a rank role OR Guardsman Access - not strictly one or the
-# other. In steady state everyone with a rank role also has Guardsman
-# Access (that's what the two commands above enforce), but this covers the
-# gap right after only one side of that pairing has been granted (e.g. a
-# rank role added manually in Discord rather than through the bot), so
-# nobody is unexpectedly locked out of is_allowed()-gated commands mid-
-# transition. Computed from TIER_ROLES + GUARDSMAN_ACCESS_ROLE so the
-# two never need to be kept in sync by hand in bot_data.json - add a role to
-# either list above and membership recognition picks it up automatically.
-MEMBER_ROLES: list[int] = list(TIER_ROLES) + ([GUARDSMAN_ACCESS_ROLE] if GUARDSMAN_ACCESS_ROLE else [])
 
 EVENT_MODES = event_data.get("event_modes")
 EVENT_TYPES = event_data.get("event_types")
@@ -120,6 +101,28 @@ ENDLESS_RECORD_ROLE_IDS: list[int] = stats_data.get("endless_record_role_ids", [
 WIN_ROLE_IDS: list[int] = stats_data.get("win_role_ids", [])
 ENDLESS_FIREWALL_ROLE_IDS: list[int] = stats_data.get("endless_firewall_role_ids", [])
 BADGE_ROLE_IDS: dict[int, int] = {int(k): v for k, v in stats_data.get("badge_role_ids", {}).items()}
+
+# Every role id across the three achievement ladders above, flattened into
+# one list - there's no separate "rank ladder" beyond these; a member's
+# Guardsman standing IS whichever of these roles they hold. Computed here
+# (rather than kept as its own manually-maintained bot_data.json key) so it
+# can never drift out of sync with the three lists it's made of - add a
+# role to any one of them and this picks it up automatically.
+# /guardsman_role_add and /guardsman_role_remove (bot/cogs/roles.py) use
+# this to detect a member gaining their first Guardsman role of any kind
+# (new applicant - also grant Guardsman Access) or losing their last one
+# (also strip Guardsman Access).
+TIER_ROLES: list[int] = ENDLESS_RECORD_ROLE_IDS + WIN_ROLE_IDS + ENDLESS_FIREWALL_ROLE_IDS
+
+# Membership, for bot purposes (is_allowed()/on_ready's player-DB sync),
+# relies on EITHER a Guardsman role OR Guardsman Access - not strictly one
+# or the other. In steady state everyone with a Guardsman role also has
+# Guardsman Access (that's what the two commands above enforce), but this
+# covers the gap right after only one side of that pairing has been
+# granted (e.g. a role added manually in Discord rather than through the
+# bot), so nobody is unexpectedly locked out of is_allowed()-gated commands
+# mid-transition.
+MEMBER_ROLES: list[int] = list(TIER_ROLES) + ([GUARDSMAN_ACCESS_ROLE] if GUARDSMAN_ACCESS_ROLE else [])
 
 # key -> (display label, unit label used in leaderboard rows)
 STAT_TYPES: dict[str, tuple[str, str]] = {
