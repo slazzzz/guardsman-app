@@ -112,6 +112,25 @@ def upsert_player_roblox_id(discord_id: int, roblox_id: int):
     conn.commit()
 
 
+def find_discord_id_for_roblox_id(roblox_id: int, exclude_discord_id: int = 0) -> Optional[int]:
+    """Whether roblox_id is already linked to some OTHER member's player row.
+    Checked before every write in upsert_player_roblox_id's callers (self-
+    service /roblox_link, the event-join form, staff /player_roblox_id_update)
+    to stop the same verified Roblox account being attached to several
+    Discord accounts - without this, one person could register several alts
+    for the same event and multiply their prize/placement, since the
+    UNIQUE(player_id, event_id) constraint on results only blocks a repeat
+    from the SAME player row, not the same underlying Roblox account under a
+    different one. exclude_discord_id lets a caller check "linked to anyone
+    ELSE" without their own existing link (if any) tripping the check."""
+    cursor.execute(
+        "SELECT discord_id FROM players WHERE roblox_id = ? AND roblox_id != 0 AND discord_id != ?",
+        (roblox_id, exclude_discord_id)
+    )
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
 def resolve_roblox_ref(raw: str) -> tuple[Optional[int], Optional[str]]:
     """Parses a CSV cell that may be a numeric roblox_id or a Roblox username.
     Returns (roblox_id, error_message). error_message is None on success;

@@ -217,6 +217,17 @@ class PlayersCog(commands.Cog):
             await interaction.response.send_message("Give a Roblox username or numeric ID.", ephemeral=True)
             return
 
+        # Stops the same Roblox account being linked to several Discord
+        # alts (see find_discord_id_for_roblox_id in bot/lookups.py).
+        conflicting_discord_id = find_discord_id_for_roblox_id(roblox_id, interaction.user.id)
+        if conflicting_discord_id:
+            await interaction.response.send_message(
+                "That Roblox account is already linked to another member here - if this is your account, "
+                "contact staff to sort it out.",
+                ephemeral=True
+            )
+            return
+
         code = start_verification(interaction.user.id, roblox_id)
 
         async def _on_verified(confirm_interaction: Interaction, verified_roblox_id: int):
@@ -246,6 +257,34 @@ class PlayersCog(commands.Cog):
             return
         if roblox_id is None:
             await interaction.response.send_message("Give a Roblox username or numeric ID.", ephemeral=True)
+            return
+
+        # Unlike the self-service /roblox_link, staff sometimes legitimately
+        # need to push through a conflict (e.g. an old alt still holds the
+        # link and needs to be reassigned) - so this warns and asks for
+        # confirmation instead of refusing outright.
+        conflicting_discord_id = find_discord_id_for_roblox_id(roblox_id, user.id)
+        if conflicting_discord_id:
+            view = ConfirmView(interaction.user.id)
+            await interaction.response.send_message(
+                f"That Roblox account is already linked to <@{conflicting_discord_id}>. "
+                f"Link it to {user.mention} anyway? This doesn't unlink it from the other member, so both "
+                f"accounts would then share a Roblox account.",
+                view=view,
+                ephemeral=True
+            )
+            await view.wait()
+
+            if not view.confirmed:
+                return
+
+            try:
+                upsert_player_roblox_id(user.id, roblox_id)
+                await interaction.followup.send(f"Roblox account linked for <@{user.id}> ✅", ephemeral=True)
+            except Exception as e:
+                print(f"Could not update player results in database: {e}")
+
+                await interaction.followup.send(f"Error occured: {e}", ephemeral=True)
             return
 
         try:

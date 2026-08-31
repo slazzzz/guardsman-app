@@ -41,6 +41,14 @@ DRILL_STATUS_LABELS = {
 # themselves to reject a join/leave on a drill that's moved on.
 OPEN_STATUSES = ("recruiting", "ready")
 
+# OPEN_STATUSES plus "in_progress" - a drill a member is currently
+# actively committed to, whether or not new people can still join it.
+# Used to enforce "one active drill at a time" (see
+# get_active_drill_id_for_player below), so this deliberately covers more
+# than OPEN_STATUSES: someone mid-drill in a VC shouldn't be able to join a
+# second one that's still recruiting.
+ACTIVE_DRILL_STATUSES = ("recruiting", "ready", "in_progress")
+
 # Matches a Discord "Copy Message Link" URL, e.g.
 # https://discord.com/channels/111/222/333 (also canary/ptb, and the legacy
 # discordapp.com domain) - captures (guild_id, channel_id, message_id).
@@ -92,6 +100,27 @@ def find_drill_using_proof(proof_channel_id: int, proof_message_id: int, exclude
         "SELECT id FROM drills WHERE proof_channel_id = ? AND proof_message_id = ? AND id != ?",
         (proof_channel_id, proof_message_id, exclude_drill_id)
     )
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def get_active_drill_id_for_player(player_id: int, exclude_drill_id: int = 0) -> Optional[int]:
+    """Whether player_id is currently an active participant (left_at IS NULL)
+    of any OTHER drill still in play (ACTIVE_DRILL_STATUSES). Used to stop a
+    member joining more than one drill at a time: without this, someone
+    could sit on several rosters simultaneously and pad every host's
+    participants_mobilized figure for a run they were never really part of,
+    or dodge one drill's roster cap by counting toward several at once.
+    exclude_drill_id lets a caller ask "any drill OTHER than this one",
+    since the drill currently being joined may already (or not yet) have a
+    row for this player."""
+    cursor.execute("""
+        SELECT dp.drill_id FROM drill_participants dp
+        JOIN drills d ON d.id = dp.drill_id
+        WHERE dp.player_id = ? AND dp.left_at IS NULL
+          AND d.status IN ('recruiting', 'ready', 'in_progress')
+          AND dp.drill_id != ?
+    """, (player_id, exclude_drill_id))
     row = cursor.fetchone()
     return row[0] if row else None
 
@@ -465,6 +494,7 @@ async def sync_drill_vc_permissions(guild: discord.Guild, drill_id: int):
         host_ow.mute_members = True
         host_ow.deafen_members = True
         host_ow.move_members = True
+        host_ow.use_application_commands = True
 
     cursor.execute(
         "SELECT target_type, target_id, permission FROM drill_vc_overrides WHERE drill_id = ?",

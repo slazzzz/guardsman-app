@@ -9,6 +9,7 @@ from discord import Embed, Interaction
 from bot.config import ADMIN_USERS, LEADERBOARD_CATEGORIES, STAFF_ROLES
 from bot.database import conn, cursor
 from bot.drills import (
+    get_active_drill_id_for_player,
     get_active_participant_count,
     get_active_participant_discord_ids,
     get_or_create_player_id,
@@ -16,7 +17,7 @@ from bot.drills import (
     refresh_drill_message,
 )
 from bot.leaderboard import build_stat_leaderboard_embed, resolve_display_names
-from bot.lookups import upsert_player_roblox_id
+from bot.lookups import find_discord_id_for_roblox_id, upsert_player_roblox_id
 from bot.roblox import get_roblox_id_from_username
 from bot.verification import VERIFICATION_TTL, clear_verification, start_verification, verify_pending
 
@@ -135,6 +136,18 @@ class JoinEventModal(discord.ui.Modal, title="Join Event"):
         if roblox_id is None:
             await interaction.response.send_message(
                 f"Couldn't find a Roblox account named '{roblox_username}' - double check the spelling and try again.",
+                ephemeral=True
+            )
+            return
+
+        # Stops one person registering several Discord alts under the same
+        # Roblox account to multiply their placement/prize in this event -
+        # see find_discord_id_for_roblox_id in bot/lookups.py.
+        conflicting_discord_id = find_discord_id_for_roblox_id(roblox_id, interaction.user.id)
+        if conflicting_discord_id:
+            await interaction.response.send_message(
+                "That Roblox account is already linked to another member here - if this is your account, "
+                "contact staff to sort it out.",
                 ephemeral=True
             )
             return
@@ -390,6 +403,18 @@ class StatBatchSubmissionReviewView(discord.ui.View):
         )
         return cursor.fetchall()
 
+    def _submitter_discord_id(self) -> Optional[int]:
+        """discord_id of whoever this batch's submissions belong to, or None
+        if the rows are already gone. Used by approve/reject to block a
+        staff member reviewing their own submission before they even get to
+        the reason modal."""
+        rows = self._load_submissions()
+        if not rows:
+            return None
+        cursor.execute("SELECT discord_id FROM players WHERE id = ?", (rows[0][1],))
+        row = cursor.fetchone()
+        return row[0] if row else None
+
     async def _finalize(self, interaction: Interaction, *, approved: bool, reason: Optional[str] = None):
         rows = self._load_submissions()
         if not rows:
@@ -401,8 +426,21 @@ class StatBatchSubmissionReviewView(discord.ui.View):
             await interaction.response.send_message(f"This submission was already {rows[0][4]}.", ephemeral=True)
             return
 
-        new_status = "approved" if approved else "rejected"
         player_id = pending_rows[0][1]
+
+        # Defense in depth - approve/reject already check this before
+        # opening the reason modal, but re-check here too in case of a
+        # race (e.g. two review clicks in flight at once).
+        cursor.execute("SELECT discord_id FROM players WHERE id = ?", (player_id,))
+        submitter_row = cursor.fetchone()
+        if submitter_row and submitter_row[0] == interaction.user.id:
+            await interaction.response.send_message(
+                "You can't review your own submission - have another staff member handle this one.",
+                ephemeral=True
+            )
+            return
+
+        new_status = "approved" if approved else "rejected"
 
         for submission_id, _player_id, stat_type, value, _status in pending_rows:
             cursor.execute(
@@ -455,12 +493,24 @@ class StatBatchSubmissionReviewView(discord.ui.View):
         if not _is_staff_member(interaction):
             await interaction.response.send_message("You don't have permission to review submissions.", ephemeral=True)
             return
+        if self._submitter_discord_id() == interaction.user.id:
+            await interaction.response.send_message(
+                "You can't review your own submission - have another staff member handle this one.",
+                ephemeral=True
+            )
+            return
         await interaction.response.send_modal(ReviewReasonModal(approved=True, finalize_callback=self._finalize))
 
     @discord.ui.button(label="Reject", style=discord.ButtonStyle.red)
     async def reject(self, interaction: Interaction, button: discord.ui.Button):
         if not _is_staff_member(interaction):
             await interaction.response.send_message("You don't have permission to review submissions.", ephemeral=True)
+            return
+        if self._submitter_discord_id() == interaction.user.id:
+            await interaction.response.send_message(
+                "You can't review your own submission - have another staff member handle this one.",
+                ephemeral=True
+            )
             return
         await interaction.response.send_modal(ReviewReasonModal(approved=False, finalize_callback=self._finalize))
 
@@ -483,6 +533,17 @@ class BadgeSubmissionReviewView(discord.ui.View):
         )
         return cursor.fetchone()
 
+    def _submitter_discord_id(self) -> Optional[int]:
+        """discord_id this submission belongs to, or None if it's already
+        gone. Used by approve/reject to block a staff member reviewing
+        their own submission before they get to the reason modal."""
+        cursor.execute(
+            "SELECT p.discord_id FROM badge_submissions bs JOIN players p ON p.id = bs.player_id WHERE bs.id = ?",
+            (self.submission_id,)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
     async def _finalize(self, interaction: Interaction, *, approved: bool, reason: Optional[str] = None):
         submission = await self._load_submission()
         if not submission:
@@ -492,6 +553,18 @@ class BadgeSubmissionReviewView(discord.ui.View):
         player_id, badge_name, status = submission
         if status != "pending":
             await interaction.response.send_message(f"This submission was already {status}.", ephemeral=True)
+            return
+
+        # Defense in depth - approve/reject already check this before
+        # opening the reason modal, but re-check here too in case of a
+        # race (e.g. two review clicks in flight at once).
+        cursor.execute("SELECT discord_id FROM players WHERE id = ?", (player_id,))
+        submitter_row = cursor.fetchone()
+        if submitter_row and submitter_row[0] == interaction.user.id:
+            await interaction.response.send_message(
+                "You can't review your own submission - have another staff member handle this one.",
+                ephemeral=True
+            )
             return
 
         new_status = "approved" if approved else "rejected"
@@ -541,12 +614,24 @@ class BadgeSubmissionReviewView(discord.ui.View):
         if not _is_staff_member(interaction):
             await interaction.response.send_message("You don't have permission to review submissions.", ephemeral=True)
             return
+        if self._submitter_discord_id() == interaction.user.id:
+            await interaction.response.send_message(
+                "You can't review your own submission - have another staff member handle this one.",
+                ephemeral=True
+            )
+            return
         await interaction.response.send_modal(ReviewReasonModal(approved=True, finalize_callback=self._finalize))
 
     @discord.ui.button(label="Reject", style=discord.ButtonStyle.red)
     async def reject(self, interaction: Interaction, button: discord.ui.Button):
         if not _is_staff_member(interaction):
             await interaction.response.send_message("You don't have permission to review submissions.", ephemeral=True)
+            return
+        if self._submitter_discord_id() == interaction.user.id:
+            await interaction.response.send_message(
+                "You can't review your own submission - have another staff member handle this one.",
+                ephemeral=True
+            )
             return
         await interaction.response.send_modal(ReviewReasonModal(approved=False, finalize_callback=self._finalize))
 
@@ -595,6 +680,15 @@ class DrillRosterView(discord.ui.View):
         existing = cursor.fetchone()
         if existing and existing[0] is None:
             await interaction.response.send_message("You're already in this drill.", ephemeral=True)
+            return
+
+        other_drill_id = get_active_drill_id_for_player(player_id, exclude_drill_id=self.drill_id)
+        if other_drill_id:
+            await interaction.response.send_message(
+                f"You're already active in Drill #{other_drill_id} - leave it (or wait for it to wrap up) "
+                f"before joining another.",
+                ephemeral=True
+            )
             return
 
         if max_participants and get_active_participant_count(self.drill_id) >= max_participants:

@@ -69,6 +69,20 @@ class DrillsCog(commands.Cog):
 
         resolved_max = max_participants or DRILL_SIZES[size][1]
 
+        # The host is about to be auto-enrolled as this drill's first
+        # participant (see add_drill_participant below), so the "one active
+        # drill at a time" rule (get_active_drill_id_for_player) applies to
+        # them too - checked before the INSERT so a blocked attempt doesn't
+        # leave an orphaned drill row behind.
+        host_player_id = get_or_create_player_id(interaction.user.id)
+        other_drill_id = get_active_drill_id_for_player(host_player_id)
+        if other_drill_id:
+            await interaction.response.send_message(
+                f"You're already an active participant in Drill #{other_drill_id} - leave it before hosting a new one.",
+                ephemeral=True
+            )
+            return
+
         cursor.execute(
             "INSERT INTO drills (season_id, host_discord_id, drill_name, drill_size, objective, max_participants) "
             "VALUES (?, ?, ?, ?, ?, ?)",
