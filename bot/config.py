@@ -202,7 +202,8 @@ LEADERBOARD_CATEGORIES: dict[str, tuple[str, dict[str, tuple[str, str]]]] = {
 #   "drill_data": {
 #       "drills_channel_id": 123456789012345678,
 #       "drill_vc_category_id": 123456789012345678,
-#       "drill_proof_channel_id": 123456789012345678
+#       "drill_proof_channel_id": 123456789012345678,
+#       "drill_ping_role_ids": [123456789012345678]
 #   }
 # drill_vc_category_id is optional - if omitted, /drill_start creates the
 # voice channel outside any category (still works, just less tidy).
@@ -248,6 +249,15 @@ EXPENDABLE_ROLE_ID: Optional[int] = drill_data.get("expendable_role_id")
 # flooding the drills channel with back-to-back posts. Staff/helpers/admins
 # are exempt (see bot.decorators.cooldown). Defaults to 15 minutes.
 DRILL_CREATE_COOLDOWN_SECONDS: float = drill_data.get("create_cooldown_seconds", 900)
+
+# Role(s) pinged in the drills channel when a new drill is posted (see
+# /drill_create in bot/cogs/drills.py) - e.g. a "Drill Notifications" role
+# members opt into, separate from the division's regular ping roles so
+# people who don't care about drills specifically aren't bothered. Optional
+# - leave unset/empty for no ping at all. A host can still opt any single
+# drill out of the ping (e.g. a small, low-key run) via /drill_create's own
+# `ping` option, which defaults to on.
+DRILL_PING_ROLE_IDS: list[int] = drill_data.get("drill_ping_role_ids", [])
 
 # How long (in hours) a drill can sit in recruiting/ready with no
 # /drill_start before bot.tasks.drill_expiry_loop nudges the host, and how

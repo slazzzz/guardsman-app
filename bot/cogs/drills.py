@@ -9,6 +9,15 @@ from discord.ext import commands
 
 from bot.shared import *  # noqa: F401,F403
 
+# Same pattern as STAFF_PING_CONTENT/STAFF_PING_ALLOWED_MENTIONS in
+# bot/cogs/stats.py - built once at import time (not on every /drill_create
+# call) since DRILL_PING_ROLE_IDS is static config, not something that
+# changes at runtime. Empty string (falsy) if DRILL_PING_ROLE_IDS is unset/
+# empty, so `content=DRILL_PING_CONTENT or None` below cleanly omits the
+# ping entirely rather than sending a message with blank content.
+DRILL_PING_CONTENT = " ".join(f"<@&{role_id}>" for role_id in DRILL_PING_ROLE_IDS)
+DRILL_PING_ALLOWED_MENTIONS = discord.AllowedMentions(roles=True, users=False, everyone=False)
+
 
 class DrillsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -27,10 +36,14 @@ class DrillsCog(commands.Cog):
         objective="What participants are trying to do.",
         size="Drill size tier - sets the default roster cap.",
         max_participants="Override the roster cap. Leave at 0 to use the size's default (uncapped for Mega).",
+        ping="Ping the configured drill role(s) when posting. Default: yes.",
     )
     @is_host()
     @cooldown(DRILL_CREATE_COOLDOWN_SECONDS)
-    async def drill_create(self, interaction: Interaction, name: str, objective: str, size: str, max_participants: int = 0):
+    async def drill_create(
+        self, interaction: Interaction, name: str, objective: str, size: str,
+        max_participants: int = 0, ping: bool = True
+    ):
         if max_participants < 0:
             await interaction.response.send_message("max_participants must be greater than 0.", ephemeral=True)
             return
@@ -127,8 +140,17 @@ class DrillsCog(commands.Cog):
         embed = build_drill_embed(drill, get_active_participant_count(drill_id))
         view = DrillRosterView(drill_id)
 
+        # Role mentions only actually notify anyone when they're in the
+        # message's plain content, not inside an embed - Discord doesn't
+        # ping for role/user mentions that only appear in embed text/fields.
+        # `ping` lets a host opt this one drill out (e.g. a small, low-key
+        # run) without needing DRILL_PING_ROLE_IDS reconfigured server-wide.
+        ping_content = (DRILL_PING_CONTENT or None) if ping else None
+
         try:
-            message = await drills_channel.send(embed=embed, view=view)
+            message = await drills_channel.send(
+                content=ping_content, embed=embed, view=view, allowed_mentions=DRILL_PING_ALLOWED_MENTIONS
+            )
         except discord.Forbidden:
             await interaction.response.send_message(
                 "I don't have permission to post in the drills channel.", ephemeral=True
@@ -1241,9 +1263,12 @@ class DrillsCog(commands.Cog):
         description="[Staff] Re-post a drill's roster message if the original one was deleted.",
     )
     @app_commands.guilds(GUILD_ID)
-    @app_commands.describe(drill_number="1-indexed, most recent first. 0 (default) = most recent drill.")
+    @app_commands.describe(
+        drill_number="1-indexed, most recent first. 0 (default) = most recent drill.",
+        ping="Ping the configured drill role(s) again on the re-post. Default: no, it's not a new drill.",
+    )
     @is_admin_or_staff()
-    async def drill_relink_message(self, interaction: Interaction, drill_number: int = 0):
+    async def drill_relink_message(self, interaction: Interaction, drill_number: int = 0, ping: bool = False):
         drill = await require_drill(interaction, drill_number)
         if drill is None:
             return
@@ -1267,8 +1292,12 @@ class DrillsCog(commands.Cog):
         embed = build_drill_embed(drill, participant_count)
         view = DrillRosterView(d["id"]) if d["status"] in OPEN_STATUSES else None
 
+        ping_content = (DRILL_PING_CONTENT or None) if ping else None
+
         try:
-            message = await drills_channel.send(embed=embed, view=view)
+            message = await drills_channel.send(
+                content=ping_content, embed=embed, view=view, allowed_mentions=DRILL_PING_ALLOWED_MENTIONS
+            )
         except discord.Forbidden:
             await interaction.response.send_message("I don't have permission to post in the drills channel.", ephemeral=True)
             return
