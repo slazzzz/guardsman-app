@@ -74,8 +74,6 @@ class RolesCog(commands.Cog):
                     roles_to_add.append(access_role)
                     access_note = f" and granted {access_role.mention} (first Guardsman role)"
 
-            print(needs_access_role, roles_to_add, access_note)
-
             await member.add_roles(*roles_to_add)
             await interaction.response.send_message(f"Added {role.mention} to {member.mention}{access_note}.", ephemeral=True)
             return
