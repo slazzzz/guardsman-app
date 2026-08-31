@@ -58,11 +58,10 @@ def drill_as_dict(drill: tuple) -> dict:
 def get_or_create_player_id(discord_id: int) -> int:
     """Returns the player row id for discord_id, creating one on the fly if
     it doesn't exist yet - a drill roster doesn't require a linked Roblox
-    account. Mirrors DrillRosterView._get_or_create_player_id in bot/ui.py
-    (that one can't import this one without a circular import, since this
-    module is what bot/ui.py itself imports from), kept here too so staff
-    override commands like /drill_force_join (bot/cogs/drills.py) can reuse
-    the same logic instead of re-deriving it."""
+    account. Shared by DrillRosterView.join (bot/ui.py), /drill_force_join
+    and drill_create's host auto-enroll (both bot/cogs/drills.py, via
+    add_drill_participant below), so none of them re-derive the same
+    upsert-or-create logic independently."""
     cursor.execute("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
     row = cursor.fetchone()
     if row:
@@ -95,6 +94,20 @@ def find_drill_using_proof(proof_channel_id: int, proof_message_id: int, exclude
     )
     row = cursor.fetchone()
     return row[0] if row else None
+
+
+def add_drill_participant(drill_id: int, discord_id: int) -> None:
+    """Enrolls discord_id as an active participant of drill_id. Upserts
+    rather than a plain INSERT so this is safe to call even if the person
+    (e.g. a host who already clicked Join Drill themselves) is somehow
+    already in the roster, or previously left - mirrors the join button's
+    own upsert in DrillRosterView.join."""
+    player_id = get_or_create_player_id(discord_id)
+    cursor.execute("""
+        INSERT INTO drill_participants (drill_id, player_id) VALUES (?, ?)
+        ON CONFLICT(drill_id, player_id) DO UPDATE SET left_at = NULL, joined_at = CURRENT_TIMESTAMP
+    """, (drill_id, player_id))
+    conn.commit()
 
 
 def get_active_participant_count(drill_id: int) -> int:
@@ -442,6 +455,7 @@ async def sync_drill_vc_permissions(guild: discord.Guild, drill_id: int):
         member = guild.get_member(discord_id)
         if member:
             ow(member).view_channel = True
+            ow(member).connect = True
 
     host_member = guild.get_member(d["host_discord_id"])
     if host_member:

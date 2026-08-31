@@ -11,6 +11,7 @@ from bot.database import conn, cursor
 from bot.drills import (
     get_active_participant_count,
     get_active_participant_discord_ids,
+    get_or_create_player_id,
     is_user_blocked_from_drill,
     refresh_drill_message,
 )
@@ -568,15 +569,6 @@ class DrillRosterView(discord.ui.View):
         self.leave.custom_id = f"drill_leave_{drill_id}"
         self.view_roster.custom_id = f"drill_view_roster_{drill_id}"
 
-    def _get_or_create_player_id(self, discord_id: int) -> int:
-        cursor.execute("SELECT id FROM players WHERE discord_id = ?", (discord_id,))
-        row = cursor.fetchone()
-        if row:
-            return row[0]
-        cursor.execute("INSERT INTO players (discord_id) VALUES (?)", (discord_id,))
-        conn.commit()
-        return cursor.lastrowid
-
     @discord.ui.button(label="Join Drill", style=discord.ButtonStyle.green)
     async def join(self, interaction: Interaction, button: discord.ui.Button):
         cursor.execute("SELECT status, max_participants, drill_name FROM drills WHERE id = ?", (self.drill_id,))
@@ -594,7 +586,7 @@ class DrillRosterView(discord.ui.View):
             await interaction.response.send_message("You're not able to join this drill.", ephemeral=True)
             return
 
-        player_id = self._get_or_create_player_id(interaction.user.id)
+        player_id = get_or_create_player_id(interaction.user.id)
 
         cursor.execute(
             "SELECT left_at FROM drill_participants WHERE drill_id = ? AND player_id = ?",

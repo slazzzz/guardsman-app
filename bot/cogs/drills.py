@@ -77,6 +77,22 @@ class DrillsCog(commands.Cog):
         conn.commit()
         drill_id = cursor.lastrowid
 
+        # The host is running the drill, so they're obviously in it -
+        # auto-enroll them as the first participant instead of making them
+        # click Join Drill on their own post. Uses the same upsert as the
+        # button (bot.drills.add_drill_participant / DrillRosterView.join),
+        # so it's safe even though a fresh drill can't already have them
+        # in drill_participants.
+        add_drill_participant(drill_id, interaction.user.id)
+
+        # Mirrors DrillRosterView.join: if the host auto-joining happens to
+        # fill the roster outright (e.g. max_participants was set to 1),
+        # flip straight to "ready" instead of waiting for a Join Drill click
+        # that will never come from anyone else.
+        if resolved_max and get_active_participant_count(drill_id) >= resolved_max:
+            cursor.execute("UPDATE drills SET status = 'ready' WHERE id = ?", (drill_id,))
+            conn.commit()
+
         # Copy the host's standing block/allow list (if any) into this
         # drill's own overrides - a COPY, not a live link, so editing either
         # one afterward doesn't touch the other. See /drill_default_block.
@@ -94,7 +110,7 @@ class DrillsCog(commands.Cog):
         cursor.execute("SELECT * FROM drills WHERE id = ?", (drill_id,))
         drill = cursor.fetchone()
 
-        embed = build_drill_embed(drill, 0)
+        embed = build_drill_embed(drill, get_active_participant_count(drill_id))
         view = DrillRosterView(drill_id)
 
         try:
