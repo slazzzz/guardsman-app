@@ -57,8 +57,7 @@ class RolesCog(commands.Cog):
             # is their union - a member's FIRST role from any of them is
             # what makes them new, regardless of which one it is.
             needs_access_role = (
-                GUARDSMAN_ACCESS_ROLE
-                and GUARDSMAN_ACCESS_ROLE not in member_roles
+                GUARDSMAN_ACCESS_ROLE not in member_roles
                 and not any(r in TIER_ROLES for r in member_roles)
             )
 
@@ -74,6 +73,8 @@ class RolesCog(commands.Cog):
                 if access_role:
                     roles_to_add.append(access_role)
                     access_note = f" and granted {access_role.mention} (first Guardsman role)"
+
+            print(needs_access_role, roles_to_add, access_note)
 
             await member.add_roles(*roles_to_add)
             await interaction.response.send_message(f"Added {role.mention} to {member.mention}{access_note}.", ephemeral=True)
