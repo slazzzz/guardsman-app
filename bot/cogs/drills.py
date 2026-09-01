@@ -37,15 +37,34 @@ class DrillsCog(commands.Cog):
         size="Drill size tier - sets the default roster cap.",
         max_participants="Override the roster cap. Leave at 0 to use the size's default (uncapped for Mega).",
         ping="Ping the configured drill role(s) when posting. Default: yes.",
+        announcement="Optional extra text posted above the embed alongside the ping - links, your own formatting, etc.",
     )
     @is_host()
     @cooldown(DRILL_CREATE_COOLDOWN_SECONDS)
     async def drill_create(
         self, interaction: Interaction, name: str, objective: str, size: str,
-        max_participants: int = 0, ping: bool = True
+        max_participants: int = 0, ping: bool = True, announcement: Optional[str] = None
     ):
         if max_participants < 0:
             await interaction.response.send_message("max_participants must be greater than 0.", ephemeral=True)
+            return
+
+        # Role mentions only actually notify anyone when they're in the
+        # message's plain content, not inside an embed - Discord doesn't
+        # ping for role/user mentions that only appear in embed text/fields
+        # - so the ping and any announcement both have to live in `content`
+        # alongside (not inside) the embed. Built and length-checked here,
+        # before the INSERT below, so a too-long announcement doesn't leave
+        # an orphaned drill row behind the way other pre-INSERT checks in
+        # this command already avoid.
+        post_content_parts = [part for part in (DRILL_PING_CONTENT if ping else "", announcement) if part]
+        post_content = " ".join(post_content_parts) or None
+        if post_content and len(post_content) > 2000:
+            await interaction.response.send_message(
+                f"That announcement is too long once combined with the ping role(s) "
+                f"({len(post_content)}/2000 characters) - please shorten it.",
+                ephemeral=True
+            )
             return
 
         # One active drill per host at a time. Doesn't touch the cooldown
@@ -140,16 +159,9 @@ class DrillsCog(commands.Cog):
         embed = build_drill_embed(drill, get_active_participant_count(drill_id))
         view = DrillRosterView(drill_id)
 
-        # Role mentions only actually notify anyone when they're in the
-        # message's plain content, not inside an embed - Discord doesn't
-        # ping for role/user mentions that only appear in embed text/fields.
-        # `ping` lets a host opt this one drill out (e.g. a small, low-key
-        # run) without needing DRILL_PING_ROLE_IDS reconfigured server-wide.
-        ping_content = (DRILL_PING_CONTENT or None) if ping else None
-
         try:
             message = await drills_channel.send(
-                content=ping_content, embed=embed, view=view, allowed_mentions=DRILL_PING_ALLOWED_MENTIONS
+                content=post_content, embed=embed, view=view, allowed_mentions=DRILL_PING_ALLOWED_MENTIONS
             )
         except discord.Forbidden:
             await interaction.response.send_message(
